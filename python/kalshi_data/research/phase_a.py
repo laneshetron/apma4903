@@ -131,6 +131,8 @@ def candle_stats(series: str, markets: list[dict], c: Client) -> dict:
     spreads, spread_by_ttx, vol_by_ttx, vol_by_hour = [], defaultdict(list), defaultdict(float), defaultdict(float)
     total_vol, n_with_vol = 0.0, 0
     for m in markets:
+        if f(m.get("volume_fp", 0)) <= 0:
+            continue  # nothing to learn from an untraded strike; saves thousands of calls on KXBTCD
         cs = c.candles(series, m)
         close = ts(m["close_time"])
         mv = 0.0
