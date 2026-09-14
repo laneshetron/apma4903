@@ -48,7 +48,7 @@ def iter_file(path: Path) -> Iterator[Record]:
     """
     with gzip.open(path, "rb") as f:
         pending = b""
-        for line in f:
+        for line in _lines_until_truncation(f):
             if not line.strip():
                 continue
             chunk = pending + line
@@ -67,3 +67,12 @@ def iter_file(path: Path) -> Iterator[Record]:
 def iter_records(data_dir: Path, start: date, end: date | None = None) -> Iterator[Record]:
     for p in raw_files(data_dir, start, end):
         yield from iter_file(p)
+
+
+def _lines_until_truncation(f) -> Iterator[bytes]:
+    """Iterate lines, stopping cleanly at a truncated gzip stream (a file the
+    collector is still writing has no end-of-stream marker yet)."""
+    try:
+        yield from f
+    except EOFError:
+        return
