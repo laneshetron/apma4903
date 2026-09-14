@@ -58,6 +58,10 @@ class Params:
     imb_thr: float | None = None      # don't rest when (other - ours)/(other + ours) at the touch >= thr
     cluster_ms: float | None = None   # after a level is emptied by trades, stay off that side this long
     keep_if_ahead_lt: int | None = None  # contracts: ignore filter vetoes for a live order this close to the front
+    # value-function hold/cancel policy (needs an EdgeModel): cancel a live order when its
+    # expected edge from (queue position, state) is below -edge_theta for at least edge_debounce_ms
+    edge_theta: float | None = None
+    edge_debounce_ms: float = 0.0
 
 
 @dataclass(slots=True)
@@ -107,6 +111,8 @@ class Quoter:
         self.stopped: set[str] = set()
         self.swept_until: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": 0, "no": 0})
         self.vetoes: dict[str, int] = defaultdict(int)  # reason -> count of (side, requote) decisions blocked
+        self.adverse_since: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": -1, "no": -1})
+        self.edge_blocked: dict[str, dict[str, bool]] = defaultdict(lambda: {"yes": False, "no": False})
         self.fill_mo: deque = deque()   # (deadline_ns, ticker, sign, price_cents, qty, horizon) for markouts of our fills
         self.fill_markouts: dict[int, list[tuple[float, int]]] = {10: [], 30: []}  # horizon -> (markout cents, qty)
         self.adverse_10s: float = 0.0   # dollars: mid move in the 10s after our fills, signed (negative = adverse)
@@ -313,6 +319,29 @@ class Quoter:
             if p.cluster_ms is not None and allow[s] and rx < self.swept_until[tk][s]:
                 allow[s] = False
                 self.vetoes["cluster"] += 1
+        if p.edge_theta is not None and ctx is not None and ctx.edge_model is not None:
+            micro = ctx.micro_unsigned()
+            ttx_min = (close_ns - rx) / 6e10
+            for s in ("yes", "no"):
+                other = "no" if s == "yes" else "yes"
+                imb = (depth[other] - depth[s]) / (depth[other] + depth[s]) if depth[other] + depth[s] > 0 else 0.0
+                o = orders.get(s)
+                q = o.ahead / QTY if (o is not None and o.ahead is not None) else depth[s] / QTY
+                e = ctx.edge_model.edge(s, imb, micro, ttx_min, q)
+                if e is None:
+                    continue
+                if e < -p.edge_theta:
+                    if self.adverse_since[tk][s] < 0:
+                        self.adverse_since[tk][s] = rx
+                    if rx - self.adverse_since[tk][s] >= p.edge_debounce_ms * 1e6:
+                        self.edge_blocked[tk][s] = True
+                else:
+                    self.adverse_since[tk][s] = -1
+                    if e >= 0:
+                        self.edge_blocked[tk][s] = False
+                if self.edge_blocked[tk][s] and allow[s]:
+                    allow[s] = False
+                    self.vetoes["edge"] += 1
         for s in ("yes", "no"):
             o = orders.get(s)
             ok = allow[s] and rx >= self.blocked[tk][s]
@@ -404,14 +433,90 @@ def fit_alpha(parquet: Path, train_frac: float = 0.6) -> tuple[np.ndarray, np.nd
     return w, mu, sd, int(df["rx_ns"][cut])
 
 
+Q_EDGES = [0, 50, 100, 200, 500, 1000, 2000, 5000, 1e12]
+IMB_EDGES = [-1e9, -0.33, 0.33, 1e9]
+MICRO_EDGES = [-1e9, -0.5, 0.5, 1e9]
+TTX_EDGES = [0, 2, 5, 10, 1e9]
+
+
+def _bucket(x: float, edges: list[float]) -> int:
+    for i in range(len(edges) - 1):
+        if edges[i] <= x < edges[i + 1]:
+            return i
+    return len(edges) - 2
+
+
+class EdgeModel:
+    """E[half-spread + 30s markout | fill from q ahead, state], estimated from the sweep
+    dataset (first train_frac of the day). States are expressed from the RESTING order's
+    side: imbalance = (other side depth - our side depth)/(sum) at the touch, micro = spot
+    microprice pressure against our order ($), ttx in minutes. Marginal tables by
+    (state, q) are combined additively around the all-state curve."""
+
+    def __init__(self, parquet: Path, train_frac: float = 0.6, order: int = 100):
+        df = pl.read_parquet(parquet).filter(pl.col("klass") != "unknown").sort("rx_ns")
+        self.cutoff_rx = int(df["rx_ns"][int(df.height * train_frac)])
+        df = df[: int(df.height * train_frac)]
+        df = df.filter(pl.col("mo0").is_not_null() & pl.col("mo30").is_not_null())
+        # features in the parquet are signed into the taker's direction == adverse-for-the-resting-order direction
+        self.all = self._curve(df, order)
+        self.imb = {i: self._curve(df.filter((pl.col("touch_imb") >= lo) & (pl.col("touch_imb") < hi)), order)
+                    for i, (lo, hi) in enumerate(zip(IMB_EDGES[:-1], IMB_EDGES[1:]))}
+        self.micro = {i: self._curve(df.filter((pl.col("cb_micro") >= lo) & (pl.col("cb_micro") < hi)), order)
+                      for i, (lo, hi) in enumerate(zip(MICRO_EDGES[:-1], MICRO_EDGES[1:]))}
+        self.ttx = {i: self._curve(df.filter((pl.col("ttx_min") >= lo) & (pl.col("ttx_min") < hi)), order)
+                    for i, (lo, hi) in enumerate(zip(TTX_EDGES[:-1], TTX_EDGES[1:]))}
+        print("edge model (all states, by q ahead): " + " ".join(f"{q}:{e:+.2f}" for q, e in zip(Q_EDGES[:-1], self.all)), file=sys.stderr)
+
+    @staticmethod
+    def _curve(d: pl.DataFrame, order: int) -> list[float | None]:
+        out = []
+        for q in Q_EDGES[:-1]:
+            f = d.filter(pl.col("qty") > q).with_columns(pl.min_horizontal(pl.lit(order), pl.col("qty") - q).alias("fill"))
+            if f.height < 50:
+                out.append(None)
+                continue
+            w = f["fill"]
+            out.append(float(((f["mo0"] + f["mo30"]) * w).sum() / w.sum()))
+        return out
+
+    def edge(self, side: str, imb: float, micro_unsigned: float | None, ttx_min: float, q: float) -> float | None:
+        qi = _bucket(q, Q_EDGES)
+        base = self.all[qi]
+        if base is None:
+            return None
+        e = base
+        c = self.imb[_bucket(imb, IMB_EDGES)][qi]
+        if c is not None:
+            e += c - base
+        if micro_unsigned is not None:
+            # pressure against a YES bid is spot going DOWN (micro < 0); against a NO bid (our ask) it is UP
+            m = -micro_unsigned if side == "yes" else micro_unsigned
+            c = self.micro[_bucket(m, MICRO_EDGES)][qi]
+            if c is not None:
+                e += c - base
+        c = self.ttx[_bucket(ttx_min, TTX_EDGES)][qi]
+        if c is not None:
+            e += c - base
+        return e
+
+
 class Context:
     """Per-time market context shared by all quoters: predicted spot drift and option Greeks."""
 
-    def __init__(self, spot: SpotState, strikes: dict[str, float], alpha_model):
+    def __init__(self, spot: SpotState, strikes: dict[str, float], alpha_model, edge_model: EdgeModel | None = None):
         self.spot = spot
         self.strikes = strikes
         self.alpha_model = alpha_model
+        self.edge_model = edge_model
         self.alpha: float | None = None
+
+    def micro_unsigned(self) -> float | None:
+        sp = self.spot
+        if sp.cb_bs is None or sp.cb_as is None or sp.cb_bs + sp.cb_as <= 0 or sp.cb_bid is None:
+            return None
+        mid = (sp.cb_bid + sp.cb_ask) / 2
+        return (sp.cb_bid * sp.cb_as + sp.cb_ask * sp.cb_bs) / (sp.cb_bs + sp.cb_as) - mid
 
     def refresh_alpha(self, rx: int) -> None:
         if self.alpha_model is None:
@@ -443,7 +548,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
     books: dict[str, FastBook] = {}
     closes: dict[str, int] = {}
     ticks: deque = deque()   # (rx_ns, mid)
-    need_ctx = any(p.alpha_thr is not None or p.greeks_cap is not None for p in configs)
+    need_ctx = any(p.alpha_thr is not None or p.greeks_cap is not None or p.edge_theta is not None for p in configs)
     alpha_model = fit_alpha(alpha_parquet) if (alpha_parquet and any(p.alpha_thr is not None for p in configs)) else None
     test_from = alpha_model[3] if alpha_model else 0
     strikes: dict[str, float] = {}
@@ -452,7 +557,10 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
                           if r.raw.get("type") == "orderbook_snapshot" and r.raw["msg"]["market_ticker"].startswith(series + "-")})
         strikes = fetch_strikes(tickers)
     spot = SpotState()
-    ctx = Context(spot, strikes, alpha_model)
+    edge_model = EdgeModel(alpha_parquet) if (alpha_parquet and any(p.edge_theta is not None for p in configs)) else None
+    if edge_model is not None and not test_from:
+        test_from = edge_model.cutoff_rx
+    ctx = Context(spot, strikes, alpha_model, edge_model)
     asset = "ETH" if "ETH" in series else "BTC"
 
     def spot_events():
@@ -543,6 +651,22 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
 
 
 _F = dict(latency_ms=2, signal_move=2.0, stop_before_s=300, max_pos=200)
+VALUE_OOS = [
+    Params("base (2ms, cancel $2/1s, stop 5min, max pos 200)", **_F),
+    Params("value policy: cancel if edge < 0, debounce 300ms", **_F, edge_theta=0.0, edge_debounce_ms=300),
+    Params("value policy: cancel if edge < 0, no debounce", **_F, edge_theta=0.0),
+]
+
+VALUE = [
+    Params("base (2ms, cancel $2/1s, stop 5min, max pos 200)", **_F),
+    Params("value policy: cancel if edge < 0, no debounce", **_F, edge_theta=0.0),
+    Params("value policy: cancel if edge < 0, debounce 300ms", **_F, edge_theta=0.0, edge_debounce_ms=300),
+    Params("value policy: cancel if edge < -0.25c, debounce 300ms", **_F, edge_theta=0.25, edge_debounce_ms=300),
+    Params("value policy: cancel if edge < -0.5c, debounce 300ms", **_F, edge_theta=0.5, edge_debounce_ms=300),
+    Params("value policy: cancel if edge < -0.25c, debounce 1s", **_F, edge_theta=0.25, edge_debounce_ms=1000),
+    Params("value policy -0.25c/300ms + greeks cap 5c", **_F, edge_theta=0.25, edge_debounce_ms=300, greeks_cap=0.05),
+]
+
 FILTERS2 = [
     Params("base (2ms, cancel $2/1s, stop 5min, max pos 200)", **_F),
     Params("mild: alpha $3", **_F, alpha_thr=3.0),
@@ -599,8 +723,10 @@ def main() -> None:
     ap.add_argument("--inventory", action="store_true", help="run the position-limit sweep")
     ap.add_argument("--filters", action="store_true", help="run the adverse-selection filter study (needs research/alpha_<day>.parquet)")
     ap.add_argument("--filters2", action="store_true", help="milder and queue-aware filter variants")
+    ap.add_argument("--value", action="store_true", help="value-function hold/cancel policy study")
+    ap.add_argument("--value-oos", action="store_true", help="value policy, out-of-sample split reported")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.day}.parquet")
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
     L = [f"# Quoter simulation, {a.series}, {a.day}", "",

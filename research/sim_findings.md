@@ -139,3 +139,27 @@ endgame). The signals matter most at larger size (fills constrained by our
 own impact) and on worse-than-today adverse-selection days — this is a
 quality/quantity frontier whose right operating point depends on capacity
 and regime.
+
+## Value-function hold/cancel policy (2ms, max pos 200, stop 5 min)
+
+`queue_value_2026-09-14.md`: expected edge (half-spread + 30s markout) of a
+resting 100-lot by contracts ahead and state. Queue position matters (front
++0.5c, back of 2,000+ negative) but state dominates: "other side deeper"
+and "microprice agrees with taker" are negative at every position.
+Vetoing those states nevertheless lost money because the states are
+transient while a cancel forfeits the queue position permanently.
+
+Policy: cancel a live order when edge(q, state) < -theta for at least a
+debounce time (stand-in for the DP's episode/hazard term); rejoin when
+edge >= 0. Edge table fit on the first 60% of the day.
+
+| policy | day P&L | adverse | c/contract | OOS P&L (32 mkts) | OOS adverse |
+|---|---|---|---|---|---|
+| base | $2,861 | −$4,539 | 0.16 | $1,269 | −$1,567 |
+| cancel if edge < 0, 300ms debounce | $2,901 | −$3,462 | 0.19 | $1,128 | −$1,322 |
+| cancel if edge < 0, no debounce | $2,415 | −$1,913 | 0.23 | $965 | −$697 |
+
+More efficient than flags (11-24% of P&L for 16-56% less adverse
+selection, vs 20-30% for the vetoes) but no OOS gain in total P&L on this
+day. Next: hazard conditional on the adverse state and a continuation term
+for queue advancement (the real DP), and a second day of data.
