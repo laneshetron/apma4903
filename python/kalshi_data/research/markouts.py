@@ -30,6 +30,7 @@ pre-trade mid and is the half-spread captured at the touch.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import statistics as st
 import sys
@@ -43,6 +44,9 @@ from ..book import parse_price, parse_qty
 from ..raw import iter_records
 
 HORIZONS_S = (1, 10, 30, 60)
+SIGNAL_MOVE = 3.0     # $ tick-to-tick index move that counts as a signal
+IDX_HORIZONS_S = (1, 5, 30)  # horizons for "does the index follow the sweep?"
+DODGE_MS = 5.0        # reaction budget for a same-AZ cancel (tick receipt -> cancel processed)
 NY = ZoneInfo("America/New_York")
 ONE = 10_000  # price units per dollar
 
@@ -124,6 +128,10 @@ class Sweep:
     mid0: float | None = None
     ttx_min: float = 0.0
     mo: dict = field(default_factory=dict)  # horizon -> markout cents (None if unresolved)
+    move_1s: float = 0.0        # |index move| over the second before the sweep ($)
+    idx0: float | None = None   # index value at the sweep
+    didx: dict = field(default_factory=dict)  # horizon -> signed index move after the sweep ($, + = taker's direction)
+    dt_signal_ms: float = 1e9   # ms since the last index tick that moved >= SIGNAL_MOVE
 
     @property
     def klass(self) -> str:
@@ -180,6 +188,11 @@ class Analyzer:
         self.gaps = 0
         self.n_trades = 0
         self.n_trades_by_series: dict[str, int] = defaultdict(int)
+        self.index_id = "BRTI"
+        self.ticks: deque = deque()   # (rx_ns, value) over the last ~2s
+        self.last_signal_rx: int = -1 # rx_ns of the last tick moving >= SIGNAL_MOVE
+        self.idx_pending: dict[int, deque] = {h: deque() for h in IDX_HORIZONS_S}  # (deadline_ns, sweep)
+        self.idx_last: float | None = None
 
     def _ms(self, ticker: str) -> MarketState | None:
         if self.series and ticker.split("-")[0] not in self.series:
@@ -267,6 +280,25 @@ class Analyzer:
                 if t in ("orderbook_snapshot", "orderbook_delta"):
                     self._mark_all_stale()
             self.last_seq[sid] = seq
+        if t == "cfbenchmarks_value_5hz":
+            msg = raw["msg"]
+            if msg.get("index_id") != self.index_id:
+                return
+            v = float(json.loads(msg["data"])["value"])
+            rx = rec.rx_ns
+            # resolve "index after sweep" lookups with the value in effect just before this tick
+            if self.idx_last is not None:
+                for h, dq in self.idx_pending.items():
+                    while dq and dq[0][0] <= rx:
+                        _, sw = dq.popleft()
+                        sw.didx[h] = sw.sign * (self.idx_last - sw.idx0)
+            self.idx_last = v
+            if self.ticks and abs(v - self.ticks[-1][1]) >= SIGNAL_MOVE:
+                self.last_signal_rx = rx
+            self.ticks.append((rx, v))
+            while self.ticks and self.ticks[0][0] < rx - 2_000_000_000:
+                self.ticks.popleft()
+            return
         if t not in ("orderbook_snapshot", "orderbook_delta", "trade"):
             return
         msg = raw["msg"]
@@ -285,6 +317,16 @@ class Analyzer:
                 sw = None
             if sw is None:
                 sw = ms.open_sweep = Sweep(msg["market_ticker"], ts_ms, rx, msg["taker_side"])
+                if self.ticks:
+                    recent = [v for r, v in self.ticks if r >= rx - 1_000_000_000]
+                    if recent:
+                        sw.move_1s = max(abs(self.ticks[-1][1] - v) for v in recent)
+                if self.last_signal_rx >= 0:
+                    sw.dt_signal_ms = (rx - self.last_signal_rx) / 1e6
+                if self.idx_last is not None:
+                    sw.idx0 = self.idx_last
+                    for h in IDX_HORIZONS_S:
+                        self.idx_pending[h].append((rx + h * 1_000_000_000, sw))
             sw.qty += parse_qty(msg["count_fp"])
             sw.prices.add(parse_price(msg["yes_price_dollars"]))
             return
@@ -325,7 +367,7 @@ def fmt(x):
     return "   n/a" if x is None else f"{x:+6.2f}"
 
 
-def report(series: str, sweeps: list[Sweep], gaps: int, n_trades: int) -> str:
+def report(series: str, sweeps: list[Sweep], gaps: int, n_trades: int, index_note: str = "") -> str:
     L = [f"## {series}", ""]
     vol = sum(s.qty for s in sweeps) / 100
     L.append(f"- {len(sweeps):,} sweeps from {n_trades:,} trades, {vol:,.0f} contracts; seq gaps in log: {gaps}")
@@ -370,6 +412,37 @@ def report(series: str, sweeps: list[Sweep], gaps: int, n_trades: int) -> str:
         name = f"{b}" if b < 10 else ("10-14" if b == 10 else "15+")
         L.append(row(name, buckets[b], sum(s.qty for s in buckets[b]) / 100 / fmvol * 100))
     L.append("")
+    L.append("")
+    L.append(f"Markouts by index-signal context (signal = {index_note}). A same-AZ quoter can cancel")
+    L.append(f"before sweeps arriving > {DODGE_MS:.0f}ms after the tick; earlier ones are unavoidable.")
+    L.append("")
+    L.append("| context | class | vol share | 0 | 1s | 10s | 30s | 60s |")
+    L.append("|---|---|---|---|---|---|---|---|")
+
+    def ctx(sw):
+        if sw.dt_signal_ms <= DODGE_MS:
+            return "post-signal, unavoidable (<=%dms)" % DODGE_MS
+        if sw.dt_signal_ms <= 1000:
+            return "post-signal, dodgeable (%d-1000ms)" % DODGE_MS
+        return "quiet (no signal in 1s)"
+
+    for name in ("quiet (no signal in 1s)", "post-signal, dodgeable (%d-1000ms)" % DODGE_MS, "post-signal, unavoidable (<=%dms)" % DODGE_MS):
+        for kname, ks in (("all", sweeps), ("full+multi", fm), ("partial", by.get("partial", []))):
+            ss = [s for s in ks if ctx(s) == name]
+            if ss:
+                cells = [fmt(wmean((s.mo.get(h), s.qty) for s in ss)) for h in (0, *HORIZONS_S)]
+                L.append(f"| {name} | {kname} | {sum(s.qty for s in ss)/100/vol*100:.0f}% | " + " | ".join(cells) + " |")
+    L.append("")
+    L.append("Does the index follow the sweep? Mean signed index move after the sweep, $ (+ = in the taker's direction), volume-weighted:")
+    L.append("")
+    L.append("| class | 1s | 5s | 30s | n |")
+    L.append("|---|---|---|---|---|")
+    for kname, ks in (("partial", by.get("partial", [])), ("full+multi", fm), ("all", sweeps)):
+        ss = [s for s in ks if s.idx0 is not None]
+        if ss:
+            cells = [fmt(wmean((s.didx.get(h), s.qty) for s in ss)) for h in IDX_HORIZONS_S]
+            L.append(f"| {kname} | " + " | ".join(cells) + f" | {len(ss):,} |")
+    L.append("")
     excl = [s for s in fm if s.ttx_min >= 2]
     if excl:
         L.append("Fill-conditioned, excluding the last 2 minutes: " + ", ".join(
@@ -385,9 +458,11 @@ def main() -> None:
     ap.add_argument("--data-dir", type=Path, default=Path("../data"))
     ap.add_argument("--series", nargs="*", default=["KXBTC15M", "KXETH15M", "KXBTCD"])
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--index", default="BRTI", help="index used for signal context (BRTI for BTC, ETHUSD_RTI for ETH)")
     a = ap.parse_args()
 
     an = Analyzer(set(a.series))
+    an.index_id = a.index
     n = 0
     last_rx = 0
     for rec in iter_records(a.data_dir, a.day, a.end):
@@ -406,7 +481,8 @@ def main() -> None:
            "Method: `python/kalshi_data/research/markouts.py`.", ""]
     for s in a.series:
         if by_series.get(s):
-            out.append(report(s, by_series[s], an.gaps, an.n_trades_by_series[s]))
+            out.append(report(s, by_series[s], an.gaps, an.n_trades_by_series[s],
+                              f"{an.index_id} tick-to-tick move >= ${SIGNAL_MOVE:g}"))
             out.append("")
     text = "\n".join(out)
     print(text)
