@@ -264,10 +264,8 @@ func (f *Feed) handle(ctx context.Context, conn *kalshi.Conn, m kalshi.RawMessag
 		f.log.Warn("undecodable message", "err", err)
 		return
 	}
-	switch env.Type {
-	case kalshi.TypeOrderbookSnapshot, kalshi.TypeOrderbookDelta, kalshi.TypeTrade, kalshi.TypeTicker:
-	default:
-		return // command responses, handled by Conn.Do
+	if env.Sid == 0 {
+		return // subscribed/error responses without a sid; handled by Conn.Do
 	}
 
 	f.mu.Lock()
@@ -282,6 +280,8 @@ func (f *Feed) handle(ctx context.Context, conn *kalshi.Conn, m kalshi.RawMessag
 		}
 		f.subs[env.Sid] = sub
 	}
+	// Every message on a sid consumes a seq, including ok/unsubscribed
+	// responses to update_subscription.
 	if env.Seq != 0 {
 		if sub.hasSeq && env.Seq != sub.lastSeq+1 {
 			f.onGapLocked(ctx, conn, sub, env)
@@ -355,7 +355,7 @@ func (f *Feed) resyncLocked(ctx context.Context, conn *kalshi.Conn, sub *subStat
 	go func() {
 		cctx, cancel := context.WithTimeout(ctx, f.cfg.CommandTimeout)
 		defer cancel()
-		if err := conn.UpdateSubscription(cctx, sid, kalshi.ActionGetSnapshot, tickers); err != nil {
+		if err := conn.RequestSnapshot(cctx, sid, tickers); err != nil {
 			f.log.Error("get_snapshot failed; dropping connection", "sid", sid, "err", err)
 			conn.Close()
 		}

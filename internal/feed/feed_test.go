@@ -30,10 +30,11 @@ type fakeServer struct {
 	cmds   []kalshi.Command // every command received, in order
 	gotCmd chan kalshi.Command
 	authOK bool
+	seq    map[int]uint64 // last seq the server has emitted per sid (for ok responses)
 }
 
 func newFakeServer(t *testing.T) (*fakeServer, *httptest.Server) {
-	fs := &fakeServer{t: t, gotCmd: make(chan kalshi.Command, 64)}
+	fs := &fakeServer{t: t, gotCmd: make(chan kalshi.Command, 64), seq: map[int]uint64{}}
 	srv := httptest.NewServer(http.HandlerFunc(fs.handle))
 	t.Cleanup(srv.Close)
 	return fs, srv
@@ -82,7 +83,17 @@ func (fs *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 			sid++
 			fs.send(c, map[string]any{"id": raw.ID, "type": "subscribed", "msg": map[string]any{"channel": p.Channels[0], "sid": sid}})
 		case "update_subscription":
-			fs.send(c, map[string]any{"id": raw.ID, "type": "ok", "sid": 1, "msg": map[string]any{"market_tickers": []string{}}})
+			var p kalshi.UpdateSubscriptionParams
+			_ = json.Unmarshal(raw.Params, &p)
+			if p.Action == kalshi.ActionGetSnapshot {
+				break // Kalshi answers with snapshots only, no ok
+			}
+			// The ok consumes a seq on the sid, like the real server.
+			fs.mu.Lock()
+			fs.seq[p.Sids[0]]++
+			seq := fs.seq[p.Sids[0]]
+			fs.mu.Unlock()
+			fs.send(c, map[string]any{"id": raw.ID, "type": "ok", "sid": p.Sids[0], "seq": seq, "msg": map[string]any{"market_tickers": []string{}}})
 		case "unsubscribe":
 			fs.send(c, map[string]any{"id": raw.ID, "type": "unsubscribed"})
 		}
@@ -92,6 +103,7 @@ func (fs *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 
 func (fs *fakeServer) send(c *websocket.Conn, v any) {
 	b, _ := json.Marshal(v)
+	b = append(b, '\n') // Kalshi frames end with a newline
 	if err := c.Write(context.Background(), websocket.MessageText, b); err != nil {
 		fs.t.Logf("server write: %v", err)
 	}
@@ -130,6 +142,14 @@ func testSigner(t *testing.T) *kalshi.Signer {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// track lets the fake server's ok responses continue the seq stream.
+func (fs *fakeServer) track(m map[string]any) map[string]any {
+	fs.mu.Lock()
+	fs.seq[m["sid"].(int)] = m["seq"].(uint64)
+	fs.mu.Unlock()
+	return m
 }
 
 func snapshot(sid int, seq uint64, ticker string, yes, no [][2]string) map[string]any {
@@ -182,9 +202,9 @@ func TestFeedSnapshotDeltaGapAndReconnect(t *testing.T) {
 	}
 
 	c := fs.latest()
-	fs.send(c, snapshot(1, 1, "A", [][2]string{{"0.5000", "10.00"}}, [][2]string{{"0.4000", "5.00"}}))
-	fs.send(c, delta(1, 2, "A", "yes", "0.5100", "3.00"))
-	fs.send(c, delta(1, 3, "A", "no", "0.4000", "-5.00"))
+	fs.send(c, fs.track(snapshot(1, 1, "A", [][2]string{{"0.5000", "10.00"}}, [][2]string{{"0.4000", "5.00"}})))
+	fs.send(c, fs.track(delta(1, 2, "A", "yes", "0.5100", "3.00")))
+	fs.send(c, fs.track(delta(1, 3, "A", "no", "0.4000", "-5.00")))
 
 	waitFor(t, "deltas applied", func() bool {
 		v, ok := f.Book("A")
@@ -197,7 +217,7 @@ func TestFeedSnapshotDeltaGapAndReconnect(t *testing.T) {
 
 	// Gap: seq jumps 3 -> 5. Feed must mark A stale, request get_snapshot,
 	// ignore deltas until the snapshot, then resume.
-	fs.send(c, delta(1, 5, "A", "yes", "0.5100", "100.00"))
+	fs.send(c, fs.track(delta(1, 5, "A", "yes", "0.5100", "100.00")))
 	upd := fs.waitCmd(t, "update_subscription")
 	var up kalshi.UpdateSubscriptionParams
 	_ = json.Unmarshal(upd.Params.(json.RawMessage), &up)
@@ -209,9 +229,9 @@ func TestFeedSnapshotDeltaGapAndReconnect(t *testing.T) {
 	if f.Stats().Gaps != 1 {
 		t.Errorf("gaps = %d", f.Stats().Gaps)
 	}
-	fs.send(c, delta(1, 6, "A", "yes", "0.5100", "100.00")) // must be ignored while stale
-	fs.send(c, snapshot(1, 7, "A", [][2]string{{"0.6000", "1.00"}}, nil))
-	fs.send(c, delta(1, 8, "A", "yes", "0.6000", "1.00"))
+	fs.send(c, fs.track(delta(1, 6, "A", "yes", "0.5100", "100.00"))) // must be ignored while stale
+	fs.send(c, fs.track(snapshot(1, 7, "A", [][2]string{{"0.6000", "1.00"}}, nil)))
+	fs.send(c, fs.track(delta(1, 8, "A", "yes", "0.6000", "1.00")))
 	waitFor(t, "resynced", func() bool {
 		v, ok := f.Book("A")
 		return ok && !v.Stale && v.Book.Levels(book.Yes) == 1
@@ -222,11 +242,17 @@ func TestFeedSnapshotDeltaGapAndReconnect(t *testing.T) {
 	}
 
 	// Negative quantity also triggers a resync.
-	fs.send(c, delta(1, 9, "A", "yes", "0.6000", "-5.00"))
+	fs.send(c, fs.track(delta(1, 9, "A", "yes", "0.6000", "-5.00")))
 	fs.waitCmd(t, "update_subscription")
 	waitFor(t, "stale after negative", func() bool { v, _ := f.Book("A"); return v.Stale })
 
-	// Market set change on a live connection -> add/delete updates.
+	// Bring A back with a snapshot so the next checks start from a clean book.
+	fs.send(c, fs.track(snapshot(1, 10, "A", [][2]string{{"0.6000", "1.00"}}, nil)))
+	waitFor(t, "clean again", func() bool { v, _ := f.Book("A"); return !v.Stale })
+
+	// Market set change on a live connection -> add/delete updates. The ok
+	// responses carry seq 11 and 12 on sid 1; they must not count as gaps.
+	gapsBefore := f.Stats().Gaps
 	if err := f.SetMarkets(ctx, []string{"A", "C"}); err != nil {
 		t.Fatal(err)
 	}
@@ -240,6 +266,18 @@ func TestFeedSnapshotDeltaGapAndReconnect(t *testing.T) {
 	if len(seen["add_markets"]) != 1 || seen["add_markets"][0] != "C" || len(seen["delete_markets"]) != 1 || seen["delete_markets"][0] != "B" {
 		t.Errorf("market sync = %v", seen)
 	}
+	fs.send(c, fs.track(delta(1, 13, "A", "yes", "0.6000", "1.00")))
+	waitFor(t, "delta after oks", func() bool {
+		v, _ := f.Book("A")
+		l, _ := v.Book.BestBid(book.Yes)
+		return l.Qty.String() == "2.00"
+	})
+	if g := f.Stats().Gaps; g != gapsBefore {
+		t.Errorf("ok responses counted as gaps: %d -> %d", gapsBefore, g)
+	}
+	if v, _ := f.Book("A"); v.Stale {
+		t.Error("A stale after ok responses")
+	}
 
 	// Server drops the connection: feed reconnects and resubscribes with the
 	// current market set; books are stale until new snapshots.
@@ -251,7 +289,7 @@ func TestFeedSnapshotDeltaGapAndReconnect(t *testing.T) {
 	}
 	waitFor(t, "reconnect", func() bool { return f.Stats().Connected && f.Stats().Reconnects == 1 })
 	c = fs.latest()
-	fs.send(c, snapshot(1, 1, "A", [][2]string{{"0.7000", "1.00"}}, nil))
+	fs.send(c, fs.track(snapshot(1, 1, "A", [][2]string{{"0.7000", "1.00"}}, nil)))
 	waitFor(t, "fresh snapshot", func() bool {
 		v, ok := f.Book("A")
 		l, _ := v.Book.BestBid(book.Yes)

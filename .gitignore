@@ -20,3 +20,5 @@ python/notebooks/.ipynb_checkpoints/
 
 # local config (template: config.example.yaml)
 config.yaml
+logs/
+research/_*.md

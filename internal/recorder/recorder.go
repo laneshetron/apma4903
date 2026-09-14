@@ -7,6 +7,7 @@ package recorder
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -131,8 +132,10 @@ func (r *Recorder) closeFileLocked() error {
 	return nil
 }
 
-// Write records one raw message received at rx.
+// Write records one raw message received at rx. Trailing whitespace is
+// dropped (Kalshi frames end with a newline) so each record stays on one line.
 func (r *Recorder) Write(rx time.Time, raw []byte) error {
+	raw = bytes.TrimRight(raw, " \t\r\n")
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {

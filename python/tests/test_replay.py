@@ -10,12 +10,23 @@ from kalshi_data.to_parquet import convert
 from kalshi_data.validate import validate
 
 
-def _write_day(data_dir: Path, day: date, lines: list[tuple[int, dict]]) -> None:
+def _write_day(data_dir: Path, day: date, lines: list[tuple[int, dict]], legacy_split: bool = False) -> None:
     d = data_dir / "raw" / day.isoformat()
     d.mkdir(parents=True)
     with gzip.open(d / "00.jsonl.gz", "wb") as f:
         for rx, raw in lines:
-            f.write(orjson.dumps({"rx_ns": rx, "raw": raw}) + b"\n")
+            rec = orjson.dumps({"rx_ns": rx, "raw": raw})
+            if legacy_split and raw.get("type") != "_local":
+                rec = rec[:-1] + b"\n}"  # closing brace on its own line, as early files have
+            f.write(rec + b"\n")
+
+
+def test_legacy_split_records(tmp_path):
+    day = date(2026, 9, 14)
+    _write_day(tmp_path, day, LINES, legacy_split=True)
+    recs = list(iter_records(tmp_path, day))
+    assert len(recs) == len(LINES)
+    assert [r.raw for r in recs] == [raw for _, raw in LINES]
 
 
 def _snap(sid, seq, tk, yes, no):

@@ -203,10 +203,30 @@ func (c *Conn) Subscribe(ctx context.Context, channel string, tickers []string) 
 	return m.Sid, nil
 }
 
-// UpdateSubscription applies add_markets / delete_markets / get_snapshot to a sid.
+// UpdateSubscription applies add_markets / delete_markets to a sid and waits
+// for the ok response.
 func (c *Conn) UpdateSubscription(ctx context.Context, sid int, action string, tickers []string) error {
 	_, err := c.Do(ctx, "update_subscription", UpdateSubscriptionParams{Sids: []int{sid}, MarketTickers: tickers, Action: action})
 	return err
+}
+
+// RequestSnapshot asks for fresh orderbook_snapshot messages for tickers on
+// sid. The server answers with the snapshots themselves (no ok response), so
+// this only waits for the write.
+func (c *Conn) RequestSnapshot(ctx context.Context, sid int, tickers []string) error {
+	return c.Send(ctx, "update_subscription", UpdateSubscriptionParams{Sids: []int{sid}, MarketTickers: tickers, Action: ActionGetSnapshot})
+}
+
+// Send writes a command without waiting for a response.
+func (c *Conn) Send(ctx context.Context, cmd string, params any) error {
+	data, err := json.Marshal(Command{ID: int(c.nextID.Add(1)), Cmd: cmd, Params: params})
+	if err != nil {
+		return err
+	}
+	if err := c.ws.Write(ctx, websocket.MessageText, data); err != nil {
+		return fmt.Errorf("kalshi: ws write %s: %w", cmd, err)
+	}
+	return nil
 }
 
 // Unsubscribe cancels sids.
