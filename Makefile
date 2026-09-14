@@ -2,9 +2,14 @@
 
 build:
 	go build -o bin/collector ./cmd/collector
+	go build -o bin/spot ./cmd/spot
 
 run: build
 	./bin/collector -config config.yaml
+
+# Record spot-exchange feeds (Coinbase, Kraken, Bitstamp, Gemini) alongside.
+run-spot: build
+	./bin/spot -data ./data
 
 test: test-go test-py
 

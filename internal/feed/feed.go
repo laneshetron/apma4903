@@ -396,8 +396,7 @@ func (f *Feed) resyncLocked(ctx context.Context, conn *kalshi.Conn, sub *subStat
 }
 
 // SetMarkets replaces the desired market set, issuing add/delete updates on
-// the live connection. Markets that are no longer desired keep their last
-// book but are marked stale.
+// the live connection. Markets that are no longer desired are dropped.
 func (f *Feed) SetMarkets(ctx context.Context, tickers []string) error {
 	want := make(map[string]struct{}, len(tickers))
 	for _, t := range tickers {
@@ -413,9 +412,7 @@ func (f *Feed) SetMarkets(ctx context.Context, tickers []string) error {
 	for t := range f.desired {
 		if _, ok := want[t]; !ok {
 			del = append(del, t)
-			if m := f.markets[t]; m != nil {
-				m.stale = true
-			}
+			delete(f.markets, t) // expired or dropped; keep /status to live markets
 		}
 	}
 	sort.Strings(add)

@@ -1,0 +1,6 @@
+{"rx_ns":1789364889880729000,"raw":{"event":"bts:subscription_succeeded","channel":"live_trades_btcusd","data":{}}}
+{"rx_ns":1789364889880742000,"raw":{"event":"bts:subscription_succeeded","channel":"order_book_btcusd","data":{}}}
+{"rx_ns":1789364889880747000,"raw":{"event":"bts:subscription_succeeded","channel":"live_trades_ethusd","data":{}}}
+{"rx_ns":1789364889885877000,"raw":{"event":"bts:subscription_succeeded","channel":"order_book_ethusd","data":{}}}
+{"rx_ns":1789364904887240000,"raw":{"event":"bts:heartbeat","channel":"","data":{"status":"success"}}}
+{"rx_ns":1789364890273961000,"raw":{"data":{"id":634977817,"timestamp":"1789364890","amount":0.00012899,"amount_str":"0.00012899","price":77523.34,"price_str":"77523.34","type":1,"microtimestamp":"1789364890223000","buy_order_id":2050170505719813,"sell_order_id":2050170534154240},"channel":"live_trades_btcusd","event":"trade"}}

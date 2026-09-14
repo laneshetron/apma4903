@@ -1,0 +1,3 @@
+{"rx_ns":1789364889499154000,"raw":{"eventId":1764556789875663,"events":[{"delta":"0.18260678","price":"77532.98","reason":"initial","remaining":"0.18260678","side":"ask","type":"change"},{"delta":"0.0032","price":"77532.97","reason":"initial","remaining":"0.0032","side":"bid","type":"change"}],"socket_sequence":0,"type":"update"}}
+{"rx_ns":1789364893346535000,"raw":{"socket_sequence":10,"type":"heartbeat"}}
+{"rx_ns":1789364906868588000,"raw":{"eventId":1764556789900394,"events":[{"amount":"0.00128992","makerSide":"bid","price":"77524.18","tid":2840141026886931,"type":"trade"}],"socket_sequence":112,"timestamp":1789364906,"timestampms":1789364906855,"type":"update"}}

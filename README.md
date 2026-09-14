@@ -26,7 +26,9 @@ $ curl -s localhost:8080/status | jq .feed
 $ curl -s localhost:8080/book/KXBTC15M-26SEP131900-00?depth=5
 ```
 
-Python tooling: `cd python && uv sync`.
+Spot feeds (the BRTI/ETHUSD_RTI constituents) are recorded by a second
+binary, `make run-spot` (status on `localhost:8081/status`), into
+`data/spot/<venue>/`. Python tooling: `cd python && uv sync`.
 
 ## Data
 
@@ -69,9 +71,12 @@ internal/book        order book
 internal/feed        subscriptions, seq/gap handling, resync, reconnect, recording
 internal/recorder    hourly gzipped JSONL writer
 internal/status      HTTP: /status, /markets, /book/{ticker}
+internal/spot        public spot-exchange WebSocket recorder (cmd/spot)
 specs/               vendored Kalshi OpenAPI + AsyncAPI specs (make specs)
-python/kalshi_data   raw reader, replay, to_parquet, validate
-testdata/            fixtures shared by Go and Python tests
+python/kalshi_data   raw reader, replay, to_parquet, validate, spot normalizer
+python/kalshi_data/research  phase_a (REST history), markouts, latency
+testdata/            fixtures shared by Go and Python tests; spot/ has sample venue frames
+research/            findings and generated reports
 ```
 
 ## Development
