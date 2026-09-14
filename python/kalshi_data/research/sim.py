@@ -394,6 +394,11 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
     return [q.summary() for q in quoters]
 
 
+INVENTORY = [
+    Params(f"max pos {mp}, 2ms, cancel $2/1s, stop 5min", latency_ms=2, signal_move=2.0, stop_before_s=300, max_pos=mp)
+    for mp in (100, 150, 200, 300, 500, 1000)
+]
+
 SWEEP = [
     *[Params(f"latency {l}ms, cancel $2/1s, stop 5min", latency_ms=l, signal_move=2.0, stop_before_s=300) for l in (1, 2, 5, 10, 20, 40, 80)],
     *[Params(f"size {sz}, 2ms, cancel $2/1s, stop 5min", latency_ms=2, signal_move=2.0, stop_before_s=300, size=sz, max_pos=5 * sz) for sz in (50, 200, 500, 1000)],
@@ -418,8 +423,9 @@ def main() -> None:
     ap.add_argument("--venue", default="coinbase")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--sweep", action="store_true", help="run the latency/size sweep instead of the base configs")
+    ap.add_argument("--inventory", action="store_true", help="run the position-limit sweep")
     a = ap.parse_args()
-    res = run(a.data_dir, a.day, a.series, a.venue, SWEEP if a.sweep else CONFIGS)
+    res = run(a.data_dir, a.day, a.series, a.venue, SWEEP if a.sweep else INVENTORY if a.inventory else CONFIGS)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
     L = [f"# Quoter simulation, {a.series}, {a.day}", "",
          "Touch quoter, 100 contracts/side unless noted, max position 500, quoting stops 2 min before expiry, inventory marked at mid. "

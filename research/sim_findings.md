@@ -89,3 +89,24 @@ assumption is clearly violated.
    sim's predictions at that size.
 3. Only then: production quoter in Go (fair value from spot feeds, queue-aware
    requoting, cancel-on-signal, inventory skew, endgame stop).
+
+## Inventory: position-limit sweep (2ms, cancel $2/1s, stop 5 min)
+
+| max position | P&L | per market | sd per market | mean/sd | c/contract | avg end position |
+|---|---|---|---|---|---|---|
+| 100 | $1,382 | $28 | $18 | 1.58 | 0.17 | 34 |
+| 150 | $1,974 | $39 | $28 | 1.41 | 0.16 | 53 |
+| 200 | $2,399 | $48 | $36 | 1.35 | 0.17 | 82 |
+| 300 | $2,804 | $56 | $49 | 1.14 | 0.18 | 136 |
+| 500 | $3,195 | $64 | $89 | 0.72 | 0.19 | 283 |
+| 1000 | $3,101 | $62 | $182 | 0.34 | 0.17 | 647 |
+
+The per-contract edge is flat: inventory control does not change fill
+quality (the adverse term is a property of the fill process). It changes
+risk: 500 -> 100 gives up 57% of the mean for 80% of the variance, and
+removes most of the settlement tail. Above ~300 extra inventory adds
+variance and no P&L. A hard one-sided stop is the crudest controller; a
+continuous skew (Avellaneda-Stoikov / GLFT reservation price, threshold-
+shaped by the 1c tick) plus a receding-horizon endgame unwind is the
+candidate to beat this baseline: target the ~$56/market of the 300 limit
+at the $18-36 sd of the 100-200 limits.
