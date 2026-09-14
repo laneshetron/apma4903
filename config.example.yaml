@@ -1,0 +1,10 @@
+# Copy to config.yaml and edit.
+env: prod                     # prod | demo
+markets:
+  tickers: []                 # explicit market tickers, e.g. [KXBTC-26SEP1417-B65000]
+  series: [KXBTC15M]          # series tickers; open markets are listed via REST and kept in sync
+  refresh_interval: 60s       # how often to re-list series markets (add/delete subscriptions)
+channels: [orderbook_delta, trade]
+data_dir: ./data              # raw logs go to <data_dir>/raw/YYYY-MM-DD/HH.jsonl.gz
+status_addr: 127.0.0.1:8080   # GET /status, GET /book/{ticker}
+rest_check_interval: 5m       # periodic REST orderbook cross-check; 0 disables

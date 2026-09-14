@@ -1,0 +1,78 @@
+{
+  "_doc": "Shared order-book fixtures. Each case feeds `messages` (WebSocket message bodies, in order) into an empty book and checks `expected` (levels as [price_dollars, qty_fp], any order) or `expect_error`.",
+  "cases": [
+    {
+      "name": "snapshot only",
+      "messages": [
+        {"type": "orderbook_snapshot", "msg": {"market_ticker": "T", "yes_dollars_fp": [["0.0800", "300.00"], ["0.2200", "333.00"]], "no_dollars_fp": [["0.5400", "20.00"], ["0.5600", "146.00"]]}}
+      ],
+      "expected": {"yes": [["0.0800", "300.00"], ["0.2200", "333.00"]], "no": [["0.5400", "20.00"], ["0.5600", "146.00"]]},
+      "top": {"bid": "0.2200", "ask": "0.4400", "spread": "0.2200", "mid": "0.3300"}
+    },
+    {
+      "name": "add new level and increase existing",
+      "messages": [
+        {"type": "orderbook_snapshot", "msg": {"market_ticker": "T", "yes_dollars_fp": [["0.5000", "10.00"]], "no_dollars_fp": []}},
+        {"type": "orderbook_delta", "msg": {"market_ticker": "T", "price_dollars": "0.5100", "delta_fp": "5.50", "side": "yes"}},
+        {"type": "orderbook_delta", "msg": {"market_ticker": "T", "price_dollars": "0.5000", "delta_fp": "2.00", "side": "yes"}},
+        {"type": "orderbook_delta", "msg": {"market_ticker": "T", "price_dollars": "0.4000", "delta_fp": "7.00", "side": "no"}}
+      ],
+      "expected": {"yes": [["0.5000", "12.00"], ["0.5100", "5.50"]], "no": [["0.4000", "7.00"]]},
+      "top": {"bid": "0.5100", "ask": "0.6000", "spread": "0.0900", "mid": "0.5550"}
+    },
+    {
+      "name": "decrease to zero removes level",
+      "messages": [
+        {"type": "orderbook_snapshot", "msg": {"market_ticker": "T", "yes_dollars_fp": [["0.5000", "10.00"], ["0.4900", "1.00"]], "no_dollars_fp": [["0.4500", "3.00"]]}},
+        {"type": "orderbook_delta", "msg": {"market_ticker": "T", "price_dollars": "0.5000", "delta_fp": "-10.00", "side": "yes"}},
+        {"type": "orderbook_delta", "msg": {"market_ticker": "T", "price_dollars": "0.4500", "delta_fp": "-1.00", "side": "no"}}
+      ],
+      "expected": {"yes": [["0.4900", "1.00"]], "no": [["0.4500", "2.00"]]},
+      "top": {"bid": "0.4900", "ask": "0.5500", "spread": "0.0600", "mid": "0.5200"}
+    },
+    {
+      "name": "negative quantity is an error",
+      "messages": [
+        {"type": "orderbook_snapshot", "msg": {"market_ticker": "T", "yes_dollars_fp": [["0.5000", "10.00"]], "no_dollars_fp": []}},
+        {"type": "orderbook_delta", "msg": {"market_ticker": "T", "price_dollars": "0.5000", "delta_fp": "-10.01", "side": "yes"}}
+      ],
+      "expect_error": "negative"
+    },
+    {
+      "name": "delta on empty level creates it; three-decimal price",
+      "messages": [
+        {"type": "orderbook_snapshot", "msg": {"market_ticker": "T", "yes_dollars_fp": [], "no_dollars_fp": []}},
+        {"type": "orderbook_delta", "msg": {"market_ticker": "T", "price_dollars": "0.960", "delta_fp": "54.00", "side": "yes"}}
+      ],
+      "expected": {"yes": [["0.9600", "54.00"]], "no": []},
+      "top": {"bid": "0.9600", "ask": null, "spread": null, "mid": null}
+    },
+    {
+      "name": "sub-penny prices are distinct levels",
+      "messages": [
+        {"type": "orderbook_snapshot", "msg": {"market_ticker": "T", "yes_dollars_fp": [["0.5000", "1.00"]], "no_dollars_fp": [["0.4975", "2.00"]]}},
+        {"type": "orderbook_delta", "msg": {"market_ticker": "T", "price_dollars": "0.5025", "delta_fp": "3.00", "side": "yes"}}
+      ],
+      "expected": {"yes": [["0.5000", "1.00"], ["0.5025", "3.00"]], "no": [["0.4975", "2.00"]]},
+      "top": {"bid": "0.5025", "ask": "0.5025", "spread": "0.0000", "mid": "0.5025"}
+    },
+    {
+      "name": "second snapshot replaces book",
+      "messages": [
+        {"type": "orderbook_snapshot", "msg": {"market_ticker": "T", "yes_dollars_fp": [["0.5000", "1.00"], ["0.1000", "9.00"]], "no_dollars_fp": [["0.4000", "2.00"]]}},
+        {"type": "orderbook_delta", "msg": {"market_ticker": "T", "price_dollars": "0.5000", "delta_fp": "1.00", "side": "yes"}},
+        {"type": "orderbook_snapshot", "msg": {"market_ticker": "T", "yes_dollars_fp": [["0.3000", "5.00"]], "no_dollars_fp": []}}
+      ],
+      "expected": {"yes": [["0.3000", "5.00"]], "no": []},
+      "top": {"bid": "0.3000", "ask": null, "spread": null, "mid": null}
+    },
+    {
+      "name": "snapshot with missing sides is empty",
+      "messages": [
+        {"type": "orderbook_snapshot", "msg": {"market_ticker": "T"}}
+      ],
+      "expected": {"yes": [], "no": []},
+      "top": {"bid": null, "ask": null, "spread": null, "mid": null}
+    }
+  ]
+}

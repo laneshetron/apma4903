@@ -1,0 +1,22 @@
+# secrets
+.env
+*.pem
+*.key
+
+# data
+data/
+
+# go
+/bin/
+
+# python
+python/.venv/
+python/**/__pycache__/
+python/.pytest_cache/
+python/.ruff_cache/
+python/notebooks/.ipynb_checkpoints/
+
+.DS_Store
+
+# local config (template: config.example.yaml)
+config.yaml

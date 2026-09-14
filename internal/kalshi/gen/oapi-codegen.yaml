@@ -1,0 +1,10 @@
+# oapi-codegen config: generate REST types + client from Kalshi's OpenAPI spec.
+package: gen
+output: client.gen.go
+generate:
+  models: true
+  client: true
+output-options:
+  # Kalshi names its schemas "<Op>Response", which collides with the generated
+  # per-operation response wrappers; give the wrappers a distinct suffix.
+  response-type-suffix: HTTPResponse
