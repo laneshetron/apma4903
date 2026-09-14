@@ -5,6 +5,7 @@ package feed
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -33,6 +34,7 @@ type Config struct {
 	Signer   *kalshi.Signer
 	Recorder *recorder.Recorder
 	Channels []string
+	IndexIDs []string // for cfbenchmarks channels
 	Logger   *slog.Logger
 
 	// Reconnect backoff bounds.
@@ -67,6 +69,7 @@ type Feed struct {
 	subs    map[int]*subState // by sid
 	conn    *kalshi.Conn
 	connGen uint64
+	indexes map[string]IndexValue // latest value per index id
 
 	// stats
 	connected   atomic.Bool
@@ -97,7 +100,16 @@ func New(cfg Config) *Feed {
 		desired: map[string]struct{}{},
 		markets: map[string]*marketState{},
 		subs:    map[int]*subState{},
+		indexes: map[string]IndexValue{},
 	}
+}
+
+// IndexValue is the latest tick of a CF Benchmarks index.
+type IndexValue struct {
+	Value  string    `json:"value"`
+	Avg60s string    `json:"avg_60s,omitempty"`
+	Time   time.Time `json:"time"`
+	Rx     time.Time `json:"rx"`
 }
 
 // Run connects and processes messages until ctx is cancelled, reconnecting
@@ -193,14 +205,19 @@ func errString(err error) string {
 func (f *Feed) subscribeAll(ctx context.Context, conn *kalshi.Conn, tickers []string) error {
 	for _, ch := range f.cfg.Channels {
 		var t []string
-		if marketScoped[ch] {
+		p := kalshi.SubscribeParams{Channels: []string{ch}}
+		switch {
+		case marketScoped[ch]:
 			if len(tickers) == 0 {
 				continue // nothing to subscribe yet; SetMarkets will handle it
 			}
 			t = tickers
+			p.MarketTickers = t
+		case kalshi.IndexChannels[ch]:
+			p.IndexIDs = f.cfg.IndexIDs
 		}
 		cctx, cancel := context.WithTimeout(ctx, f.cfg.CommandTimeout)
-		sid, err := conn.Subscribe(cctx, ch, t)
+		sid, err := conn.Subscribe(cctx, p)
 		cancel()
 		if err != nil {
 			return fmt.Errorf("subscribe %s: %w", ch, err)
@@ -322,6 +339,22 @@ func (f *Feed) handle(ctx context.Context, conn *kalshi.Conn, m kalshi.RawMessag
 			return
 		}
 		ms.lastRx, ms.lastTs = m.Rx, d.TsMs
+	case kalshi.TypeCFBenchmarksValue, kalshi.TypeCFBenchmarks5Hz:
+		var iv kalshi.IndexValueMsg
+		if err := env.Decode(&iv); err != nil {
+			return
+		}
+		var tick kalshi.IndexTick
+		if json.Unmarshal([]byte(iv.Data), &tick) != nil {
+			return
+		}
+		v := IndexValue{Value: tick.Value, Time: time.UnixMilli(tick.Time), Rx: m.Rx}
+		if iv.Avg60s != nil {
+			v.Avg60s = iv.Avg60s.Value
+		} else if prev, ok := f.indexes[iv.IndexID]; ok {
+			v.Avg60s = prev.Avg60s // keep the 1/s channel's average alongside 5hz ticks
+		}
+		f.indexes[iv.IndexID] = v
 	}
 }
 
@@ -473,15 +506,16 @@ func (f *Feed) Markets() []string {
 
 // Stats is a point-in-time summary for the status endpoint.
 type Stats struct {
-	Connected   bool             `json:"connected"`
-	ConnectedAt time.Time        `json:"connected_at,omitempty"`
-	Reconnects  uint64           `json:"reconnects"`
-	Messages    uint64           `json:"messages"`
-	Gaps        uint64           `json:"gaps"`
-	LastMessage time.Time        `json:"last_message,omitempty"`
-	Markets     int              `json:"markets"`
-	Stale       []string         `json:"stale_markets"`
-	Subs        map[int]SubStats `json:"subscriptions"`
+	Connected   bool                  `json:"connected"`
+	ConnectedAt time.Time             `json:"connected_at,omitempty"`
+	Reconnects  uint64                `json:"reconnects"`
+	Messages    uint64                `json:"messages"`
+	Gaps        uint64                `json:"gaps"`
+	LastMessage time.Time             `json:"last_message,omitempty"`
+	Markets     int                   `json:"markets"`
+	Stale       []string              `json:"stale_markets"`
+	Subs        map[int]SubStats      `json:"subscriptions"`
+	Indexes     map[string]IndexValue `json:"indexes"`
 }
 
 // SubStats describes one subscription.
@@ -502,6 +536,10 @@ func (f *Feed) Stats() Stats {
 		Markets:    len(f.markets),
 		Stale:      []string{},
 		Subs:       map[int]SubStats{},
+		Indexes:    map[string]IndexValue{},
+	}
+	for k, v := range f.indexes {
+		s.Indexes[k] = v
 	}
 	if ns := f.connectedAt.Load(); ns != 0 && s.Connected {
 		s.ConnectedAt = time.Unix(0, ns)

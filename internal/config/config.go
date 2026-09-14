@@ -23,6 +23,7 @@ type Config struct {
 		RefreshInterval time.Duration `yaml:"refresh_interval"`
 	} `yaml:"markets"`
 	Channels          []string      `yaml:"channels"`
+	IndexIDs          []string      `yaml:"index_ids"`
 	DataDir           string        `yaml:"data_dir"`
 	StatusAddr        string        `yaml:"status_addr"`
 	RESTCheckInterval time.Duration `yaml:"rest_check_interval"`
@@ -56,6 +57,9 @@ func Load(path string) (*Config, error) {
 	}
 	if len(c.Channels) == 0 {
 		c.Channels = []string{kalshi.ChannelOrderbookDelta, kalshi.ChannelTrade}
+	}
+	if len(c.IndexIDs) == 0 {
+		c.IndexIDs = []string{"BRTI", "ETHUSD_RTI"}
 	}
 	if c.DataDir == "" {
 		c.DataDir = "./data"

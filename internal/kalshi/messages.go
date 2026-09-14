@@ -13,7 +13,12 @@ const (
 	ChannelTicker          = "ticker"
 	ChannelTrade           = "trade"
 	ChannelMarketLifecycle = "market_lifecycle_v2"
+	ChannelCFBenchmarks    = "cfbenchmarks_value"     // 1/s with 60s averages
+	ChannelCFBenchmarks5Hz = "cfbenchmarks_value_5hz" // raw ticks
 )
+
+// IndexChannels take index_ids instead of market_tickers.
+var IndexChannels = map[string]bool{ChannelCFBenchmarks: true, ChannelCFBenchmarks5Hz: true}
 
 // Server message types.
 const (
@@ -25,6 +30,8 @@ const (
 	TypeOrderbookDelta    = "orderbook_delta"
 	TypeTicker            = "ticker"
 	TypeTrade             = "trade"
+	TypeCFBenchmarksValue = "cfbenchmarks_value"
+	TypeCFBenchmarks5Hz   = "cfbenchmarks_value_5hz"
 )
 
 // Command is a client -> server command envelope.
@@ -38,6 +45,7 @@ type Command struct {
 type SubscribeParams struct {
 	Channels      []string `json:"channels"`
 	MarketTickers []string `json:"market_tickers,omitempty"`
+	IndexIDs      []string `json:"index_ids,omitempty"` // cfbenchmarks channels
 }
 
 // UnsubscribeParams are the params for cmd "unsubscribe".
@@ -135,6 +143,24 @@ type TradeMsg struct {
 	TakerBookSide    string `json:"taker_book_side"`
 	IsBlockTrade     bool   `json:"is_block_trade"`
 	TsMs             int64  `json:"ts_ms"`
+}
+
+// IndexValueMsg is the msg of cfbenchmarks_value / cfbenchmarks_value_5hz.
+// Data is the CF Benchmarks tick as a JSON string; Avg60s is only on the 1/s channel.
+type IndexValueMsg struct {
+	IndexID    string `json:"index_id"`
+	ReceivedAt int64  `json:"received_at"`
+	Data       string `json:"data"`
+	Avg60s     *struct {
+		Value string `json:"value"`
+	} `json:"avg_60s_data,omitempty"`
+}
+
+// IndexTick is the decoded Data of an IndexValueMsg.
+type IndexTick struct {
+	ID    string `json:"id"`
+	Time  int64  `json:"time"`
+	Value string `json:"value"`
 }
 
 // TickerMsg is the msg of a "ticker".

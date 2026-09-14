@@ -60,7 +60,7 @@ func run(cfgPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	f := feed.New(feed.Config{Env: env, Signer: signer, Recorder: rec, Channels: cfg.Channels, Logger: log})
+	f := feed.New(feed.Config{Env: env, Signer: signer, Recorder: rec, Channels: cfg.Channels, IndexIDs: cfg.IndexIDs, Logger: log})
 
 	// Resolve the initial market set before connecting so the first
 	// subscribe carries every market.

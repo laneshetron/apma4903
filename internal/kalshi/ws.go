@@ -189,10 +189,9 @@ func (c *Conn) Do(ctx context.Context, cmd string, params any) (*Envelope, error
 	}
 }
 
-// Subscribe subscribes channel for the given markets (nil = all, where allowed)
-// and returns the server-assigned sid.
-func (c *Conn) Subscribe(ctx context.Context, channel string, tickers []string) (int, error) {
-	env, err := c.Do(ctx, "subscribe", SubscribeParams{Channels: []string{channel}, MarketTickers: tickers})
+// Subscribe subscribes one channel and returns the server-assigned sid.
+func (c *Conn) Subscribe(ctx context.Context, p SubscribeParams) (int, error) {
+	env, err := c.Do(ctx, "subscribe", p)
 	if err != nil {
 		return 0, err
 	}
