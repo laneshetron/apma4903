@@ -131,6 +131,7 @@ class Sweep:
     mo: dict = field(default_factory=dict)  # horizon -> markout cents (None if unresolved)
     move_1s: float = 0.0        # |index move| over the second before the sweep ($)
     pre_1s: float | None = None # signed signal move over the prior 1s, + = in the taker's direction ($)
+    feats: dict = field(default_factory=dict)  # optional per-sweep features (see research/alpha.py)
     idx0: float | None = None   # index value at the sweep
     didx: dict = field(default_factory=dict)  # horizon -> signed index move after the sweep ($, + = taker's direction)
     dt_signal_ms: float = 1e9   # ms since the last index tick that moved >= SIGNAL_MOVE
@@ -261,6 +262,11 @@ class Analyzer:
             ms.pending[h].append((sw.rx_ns + h * 1_000_000_000, sw))
         self.sweeps.append(sw)
 
+    def on_sweep_open(self, sw: Sweep, ms: MarketState) -> None:
+        """Hook for subclasses: called when the first trade of a sweep arrives,
+        before the sweep is classified. ms.book is the book after the sweep's
+        own deltas (they arrive ~30us before the trade)."""
+
     # -- signal series (BRTI or a spot mid) --------------------------------
     def tick(self, rx: int, v: float) -> None:
         # resolve "signal after sweep" lookups with the value in effect just before this tick
@@ -328,6 +334,7 @@ class Analyzer:
                 sw = None
             if sw is None:
                 sw = ms.open_sweep = Sweep(msg["market_ticker"], ts_ms, rx, msg["taker_side"])
+                self.on_sweep_open(sw, ms)
                 if self.ticks:
                     recent = [v for r, v in self.ticks if r >= rx - 1_000_000_000]
                     if recent:

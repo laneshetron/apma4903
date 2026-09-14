@@ -22,3 +22,4 @@ python/notebooks/.ipynb_checkpoints/
 config.yaml
 logs/
 research/_*.md
+research/*.parquet
