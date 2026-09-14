@@ -3,37 +3,67 @@ snapshots the collector recorded.
 
     uv run python -m kalshi_data.validate 2026-09-14 [--data-dir ../data] [-v]
 
-REST and the stream are not atomically consistent, so a small number of
-one-off mismatches is normal; the same market mismatching on consecutive
-checks is not.
+A REST snapshot is taken some tens of ms before its response reaches us, so
+on a busy market the replayed book at receive time legitimately differs; a
+check passes if the book matched at some instant in the preceding 2s. A
+market that fails that test is a real divergence.
 """
 
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
-from .book import fmt_price, fmt_qty
 from .raw import iter_records
-from .replay import Replayer, RestCheck
+from .replay import Replayer, RestCheck, matches_within
+
+WINDOW_NS = 2_000_000_000
 
 
 def validate(data_dir: Path, day: date, verbose: bool = False) -> int:
-    r = Replayer()
+    r = Replayer(history_ns=WINDOW_NS)
     checks: Counter[str] = Counter()
-    mismatches: Counter[str] = Counter()
+    mismatches: Counter[str] = Counter()   # differed at receive time
+    failures: Counter[str] = Counter()     # no matching instant within the window
     skipped: Counter[str] = Counter()
-    streak: dict[str, int] = defaultdict(int)
-    persistent: set[str] = set()
+    offsets: list[float] = []
     updates = 0
+    # forward checks: ticker -> list of [deadline_ns, want, have, diff, best, best_off, rx_ns]
+    forward: dict[str, list] = {}
+
+    def settle(tk: str, fc: list, force: bool = False) -> None:
+        for f in list(fc):
+            if force or f[0] <= now:
+                fc.remove(f)
+                if f[4] == 0:
+                    offsets.append(f[5])
+                else:
+                    failures[tk] += 1
+                    if verbose:
+                        print(f"{f[6]} {tk}: best {f[4]} differing levels within -{WINDOW_NS/1e9:g}s..+{WINDOW_NS/1e9:g}s")
+
+    now = 0
     for rec in iter_records(data_dir, day):
+        now = rec.rx_ns
         out = r.feed(rec)
         if out is None:
             continue
         if not isinstance(out, RestCheck):
             updates += 1
+            fc = forward.get(out.ticker)
+            if fc:
+                if out.kind == "delta":
+                    for f in fc:
+                        k = (out.side, out.price)
+                        w = f[1].get(k, 0)
+                        was = f[2].get(k, 0) != w
+                        f[2][k] = out.qty
+                        f[3] += (out.qty != w) - was
+                        if f[3] < f[4]:
+                            f[4], f[5] = f[3], (out.rx_ns - f[6]) / 1e6
+                settle(out.ticker, fc)
             continue
         checks[out.ticker] += 1
         if out.live is None:
@@ -41,23 +71,31 @@ def validate(data_dir: Path, day: date, verbose: bool = False) -> int:
             continue
         diff = out.live.diff(out.rest)
         if not diff:
-            streak[out.ticker] = 0
             continue
         mismatches[out.ticker] += 1
-        streak[out.ticker] += 1
-        if streak[out.ticker] >= 2:
-            persistent.add(out.ticker)
-        if verbose:
-            side, p, have, want = diff[0]
-            print(f"{out.rx_ns} {out.ticker}: {len(diff)} levels differ; first {side} {fmt_price(p)} have={fmt_qty(have)} want={fmt_qty(want)}")
+        best, off = matches_within(r, out.ticker, out.rest, out.rx_ns, WINDOW_NS)
+        if best == 0:
+            offsets.append(off)
+            continue
+        # no earlier match: watch the next WINDOW for the stream catching up to REST
+        live = r.books[out.ticker]
+        have = {("yes", p): q for p, q in live.yes.items()} | {("no", p): q for p, q in live.no.items()}
+        want = {("yes", p): q for p, q in out.rest.yes.items()} | {("no", p): q for p, q in out.rest.no.items()}
+        forward.setdefault(out.ticker, []).append([out.rx_ns + WINDOW_NS, want, have, len(diff), best, off, out.rx_ns])
+
+    for tk, fc in forward.items():
+        settle(tk, fc, force=True)
 
     print(f"book updates applied: {updates}")
     print(f"seq gaps: {r.gaps}   negative-qty divergences: {r.negatives}")
-    print(f"rest checks: {sum(checks.values())} across {len(checks)} markets; "
-          f"mismatched: {sum(mismatches.values())}; skipped (stale): {sum(skipped.values())}")
-    if persistent:
-        print("PERSISTENT mismatches (>=2 consecutive checks):", ", ".join(sorted(persistent)))
+    print(f"rest checks: {sum(checks.values())} across {len(checks)} markets; skipped (stale): {sum(skipped.values())}")
+    print(f"differed at receive time: {sum(mismatches.values())}, of which matched an instant within the window: {len(offsets)}"
+          + (f" (median offset {sorted(offsets)[len(offsets)//2]:.0f}ms)" if offsets else ""))
+    if failures:
+        print(f"FAILED (no match within {WINDOW_NS/1e9:g}s): {sum(failures.values())} checks on "
+              + ", ".join(f"{t} x{n}" for t, n in sorted(failures.items())))
         return 1
+    print("all checks reconcile")
     return 0
 
 

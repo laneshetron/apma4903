@@ -30,6 +30,7 @@ pre-trade mid and is the half-spread captured at the touch.
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import re
 import statistics as st
@@ -44,7 +45,7 @@ from ..book import parse_price, parse_qty
 from ..raw import iter_records
 
 HORIZONS_S = (1, 10, 30, 60)
-SIGNAL_MOVE = 3.0     # $ tick-to-tick index move that counts as a signal
+SIGNAL_MOVE = 8.0     # $ move of the signal series over 1s that counts as a signal (~2 sigma/s for BTC)
 IDX_HORIZONS_S = (1, 5, 30)  # horizons for "does the index follow the sweep?"
 DODGE_MS = 5.0        # reaction budget for a same-AZ cancel (tick receipt -> cancel processed)
 NY = ZoneInfo("America/New_York")
@@ -129,6 +130,7 @@ class Sweep:
     ttx_min: float = 0.0
     mo: dict = field(default_factory=dict)  # horizon -> markout cents (None if unresolved)
     move_1s: float = 0.0        # |index move| over the second before the sweep ($)
+    pre_1s: float | None = None # signed signal move over the prior 1s, + = in the taker's direction ($)
     idx0: float | None = None   # index value at the sweep
     didx: dict = field(default_factory=dict)  # horizon -> signed index move after the sweep ($, + = taker's direction)
     dt_signal_ms: float = 1e9   # ms since the last index tick that moved >= SIGNAL_MOVE
@@ -189,6 +191,8 @@ class Analyzer:
         self.n_trades = 0
         self.n_trades_by_series: dict[str, int] = defaultdict(int)
         self.index_id = "BRTI"
+        self.signal_source = "index"  # "index" (cfbenchmarks 5hz) or "spot" (ticks fed via tick())
+        self.move = SIGNAL_MOVE
         self.ticks: deque = deque()   # (rx_ns, value) over the last ~2s
         self.last_signal_rx: int = -1 # rx_ns of the last tick moving >= SIGNAL_MOVE
         self.idx_pending: dict[int, deque] = {h: deque() for h in IDX_HORIZONS_S}  # (deadline_ns, sweep)
@@ -257,6 +261,25 @@ class Analyzer:
             ms.pending[h].append((sw.rx_ns + h * 1_000_000_000, sw))
         self.sweeps.append(sw)
 
+    # -- signal series (BRTI or a spot mid) --------------------------------
+    def tick(self, rx: int, v: float) -> None:
+        # resolve "signal after sweep" lookups with the value in effect just before this tick
+        if self.idx_last is not None:
+            for h, dq in self.idx_pending.items():
+                while dq and dq[0][0] <= rx:
+                    _, sw = dq.popleft()
+                    sw.didx[h] = sw.sign * (self.idx_last - sw.idx0)
+        self.idx_last = v
+        self.ticks.append((rx, v))
+        while self.ticks and self.ticks[0][0] < rx - 2_000_000_000:
+            self.ticks.popleft()
+        # signal: the series moved >= SIGNAL_MOVE over the trailing second
+        for r, pv in self.ticks:
+            if r >= rx - 1_000_000_000:
+                if abs(v - pv) >= self.move:
+                    self.last_signal_rx = rx
+                break
+
     # -- record handling ---------------------------------------------------
     def feed(self, rec) -> None:
         raw = rec.raw
@@ -284,20 +307,8 @@ class Analyzer:
             msg = raw["msg"]
             if msg.get("index_id") != self.index_id:
                 return
-            v = float(json.loads(msg["data"])["value"])
-            rx = rec.rx_ns
-            # resolve "index after sweep" lookups with the value in effect just before this tick
-            if self.idx_last is not None:
-                for h, dq in self.idx_pending.items():
-                    while dq and dq[0][0] <= rx:
-                        _, sw = dq.popleft()
-                        sw.didx[h] = sw.sign * (self.idx_last - sw.idx0)
-            self.idx_last = v
-            if self.ticks and abs(v - self.ticks[-1][1]) >= SIGNAL_MOVE:
-                self.last_signal_rx = rx
-            self.ticks.append((rx, v))
-            while self.ticks and self.ticks[0][0] < rx - 2_000_000_000:
-                self.ticks.popleft()
+            if self.signal_source == "index":
+                self.tick(rec.rx_ns, float(json.loads(msg["data"])["value"]))
             return
         if t not in ("orderbook_snapshot", "orderbook_delta", "trade"):
             return
@@ -321,6 +332,7 @@ class Analyzer:
                     recent = [v for r, v in self.ticks if r >= rx - 1_000_000_000]
                     if recent:
                         sw.move_1s = max(abs(self.ticks[-1][1] - v) for v in recent)
+                        sw.pre_1s = sw.sign * (self.ticks[-1][1] - recent[0])
                 if self.last_signal_rx >= 0:
                     sw.dt_signal_ms = (rx - self.last_signal_rx) / 1e6
                 if self.idx_last is not None:
@@ -433,6 +445,18 @@ def report(series: str, sweeps: list[Sweep], gaps: int, n_trades: int, index_not
                 cells = [fmt(wmean((s.mo.get(h), s.qty) for s in ss)) for h in (0, *HORIZONS_S)]
                 L.append(f"| {name} | {kname} | {sum(s.qty for s in ss)/100/vol*100:.0f}% | " + " | ".join(cells) + " |")
     L.append("")
+    L.append("Markouts by SIGNED signal move over the prior 1s (+ = spot already moved in the taker's direction):")
+    L.append("")
+    L.append("| prior-1s move | class | vol share | 0 | 1s | 10s | 30s | 60s |")
+    L.append("|---|---|---|---|---|---|---|---|")
+    edges = [(-1e9, -8, "< -$8"), (-8, -2, "-$8..-$2"), (-2, 2, "-$2..+$2"), (2, 8, "+$2..+$8"), (8, 1e9, "> +$8")]
+    for lo, hi, name in edges:
+        for kname, ks in (("all", sweeps), ("full+multi", fm), ("partial", by.get("partial", []))):
+            ss = [s for s in ks if s.pre_1s is not None and lo <= s.pre_1s < hi]
+            if ss:
+                cells = [fmt(wmean((s.mo.get(h), s.qty) for s in ss)) for h in (0, *HORIZONS_S)]
+                L.append(f"| {name} | {kname} | {sum(s.qty for s in ss)/100/vol*100:.0f}% | " + " | ".join(cells) + " |")
+    L.append("")
     L.append("Does the index follow the sweep? Mean signed index move after the sweep, $ (+ = in the taker's direction), volume-weighted:")
     L.append("")
     L.append("| class | 1s | 5s | 30s | n |")
@@ -459,13 +483,34 @@ def main() -> None:
     ap.add_argument("--series", nargs="*", default=["KXBTC15M", "KXETH15M", "KXBTCD"])
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--index", default="BRTI", help="index used for signal context (BRTI for BTC, ETHUSD_RTI for ETH)")
+    ap.add_argument("--signal", default="index", help="'index' (cfbenchmarks 5hz) or 'spot:<venue>' (e.g. spot:coinbase mid)")
+    ap.add_argument("--move", type=float, default=SIGNAL_MOVE, help="$ move over 1s that counts as a signal")
     a = ap.parse_args()
 
     an = Analyzer(set(a.series))
     an.index_id = a.index
+    an.move = a.move
+    stream = iter_records(a.data_dir, a.day, a.end)
+    signal_name = a.index
+    if a.signal.startswith("spot:"):
+        venue = a.signal.split(":", 1)[1]
+        asset = "ETH" if a.index.startswith("ETH") else "BTC"
+        an.signal_source = "spot"
+        signal_name = f"{venue} {asset} mid"
+        from ..spot import SpotQuote, iter_spot
+
+        def quotes():
+            for q in iter_spot(a.data_dir, venue, a.day, a.end):
+                if isinstance(q, SpotQuote) and q.asset == asset:
+                    yield q
+
+        stream = heapq.merge(stream, quotes(), key=lambda r: r.rx_ns)
     n = 0
     last_rx = 0
-    for rec in iter_records(a.data_dir, a.day, a.end):
+    for rec in stream:
+        if not hasattr(rec, "raw"):
+            an.tick(rec.rx_ns, (rec.bid + rec.ask) / 2)
+            continue
         an.feed(rec)
         last_rx = rec.rx_ns
         n += 1
@@ -482,7 +527,7 @@ def main() -> None:
     for s in a.series:
         if by_series.get(s):
             out.append(report(s, by_series[s], an.gaps, an.n_trades_by_series[s],
-                              f"{an.index_id} tick-to-tick move >= ${SIGNAL_MOVE:g}"))
+                              f"{signal_name} move >= ${an.move:g} over 1s"))
             out.append("")
     text = "\n".join(out)
     print(text)
