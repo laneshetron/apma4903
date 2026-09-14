@@ -24,9 +24,15 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+import math
+
+import numpy as np
+import polars as pl
+
 from ..book import parse_price, parse_qty
 from ..raw import iter_records
-from ..spot import SpotQuote, iter_spot
+from ..spot import SpotQuote, SpotTrade, iter_spot
+from .alpha import VENUES, SpotState, fetch_strikes
 from .markouts import FastBook, close_time
 
 ONE = 10_000
@@ -45,6 +51,13 @@ class Params:
     signal_move: float | None = None  # $ over 1s on the spot mid; None disables
     cooldown_ms: float = 1000.0
     queue: str = "prorata"          # prorata | pessimistic
+    # adverse-selection filters
+    alpha_thr: float | None = None    # $: don't rest a side when predicted 5s spot move is >= thr against it
+    greeks_cap: float | None = None   # don't quote when a 1-sigma 10s spot move is worth >= cap (fraction of $1)
+    min_depth: int | None = None      # contracts: don't JOIN a touch on our side thinner than this
+    imb_thr: float | None = None      # don't rest when (other - ours)/(other + ours) at the touch >= thr
+    cluster_ms: float | None = None   # after a level is emptied by trades, stay off that side this long
+    keep_if_ahead_lt: int | None = None  # contracts: ignore filter vetoes for a live order this close to the front
 
 
 @dataclass(slots=True)
@@ -79,6 +92,7 @@ class MarketPnL:
     pre_mid: float | None = None  # mid before the first delta of the current ts_ms (pre-sweep)
     last_ts: int = -1
     improved_fills: int = 0  # fills on a quote that improved the touch (alone at the front)
+    stop_rx: int = 0         # rx_ns when quoting stopped (for train/test split)
 
 
 class Quoter:
@@ -91,6 +105,8 @@ class Quoter:
         self.pnl: dict[str, MarketPnL] = {}
         self.blocked: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": 0, "no": 0})  # side -> rx_ns until which quoting is off
         self.stopped: set[str] = set()
+        self.swept_until: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": 0, "no": 0})
+        self.vetoes: dict[str, int] = defaultdict(int)  # reason -> count of (side, requote) decisions blocked
         self.fill_mo: deque = deque()   # (deadline_ns, ticker, sign, price_cents, qty, horizon) for markouts of our fills
         self.fill_markouts: dict[int, list[tuple[float, int]]] = {10: [], 30: []}  # horizon -> (markout cents, qty)
         self.adverse_10s: float = 0.0   # dollars: mid move in the 10s after our fills, signed (negative = adverse)
@@ -175,7 +191,7 @@ class Quoter:
                     # adverse-selection slice of inventory P&L (negative = moved against us)
                     self.adverse_10s += sign * (mid0 - mid) / 100 * q / QTY
 
-    def on_delta(self, tk: str, rx: int, ts_ms: int, side: str, price: int, before: int, after: int, book: FastBook, close_ns: int) -> None:
+    def on_delta(self, tk: str, rx: int, ts_ms: int, side: str, price: int, before: int, after: int, book: FastBook, close_ns: int, ctx: "Context | None" = None) -> None:
         r = self.m(tk)
         mid = book.mid()
         if ts_ms != r.last_ts:
@@ -197,12 +213,14 @@ class Quoter:
             self._flush_unexplained(oo, rx, book)
             if oo.ahead is None and rx >= oo.active_from:
                 oo.ahead = book.side(oo.side).get(oo.price, 0)
-        self._requote(tk, rx, book, close_ns)
+        self._requote(tk, rx, book, close_ns, ctx)
 
     def on_trade(self, tk: str, rx: int, ts_ms: int, taker_side: str, yes_price: int, qty: int, book: FastBook) -> None:
         self.m(tk).market_volume += qty
         side = "yes" if taker_side == "no" else "no"        # resting side consumed
         price = yes_price if side == "yes" else ONE - yes_price
+        if self.p.cluster_ms is not None and book.side(side).get(price, 0) == 0:
+            self.swept_until[tk][side] = rx + int(self.p.cluster_ms * 1e6)  # level emptied by this sweep
         o = self.orders[tk].get(side)
         if o is None or o.price != price or o.ahead is None or not self._live(o, rx):
             return
@@ -237,7 +255,7 @@ class Quoter:
             if o is not None and o.cancel_at is None:
                 o.cancel_at = rx + self.lat
 
-    def _requote(self, tk: str, rx: int, book: FastBook, close_ns: int) -> None:
+    def _requote(self, tk: str, rx: int, book: FastBook, close_ns: int, ctx: "Context | None" = None) -> None:
         orders = self.orders[tk]
         # drop cancelled orders whose cancel has landed
         for s in list(orders):
@@ -249,6 +267,7 @@ class Quoter:
         if stop:
             if tk not in self.stopped:
                 self.stopped.add(tk)
+                r.stop_rx = rx
                 mid = book.mid()
                 if mid is not None:
                     r.mark_pnl = r.cash + r.pos / QTY * mid / 100
@@ -268,9 +287,40 @@ class Quoter:
         pos = r.pos
         lim = self.p.max_pos * QTY - self.p.size * QTY
         allow = {"yes": pos <= lim, "no": pos >= -lim}
+        p = self.p
+        if p.greeks_cap is not None and ctx is not None:
+            g = ctx.delta_sigma10(tk, close_ns)
+            if g is not None and g >= p.greeks_cap:
+                allow = {"yes": False, "no": False}
+                self.vetoes["greeks"] += 2
+        if p.alpha_thr is not None and ctx is not None and ctx.alpha is not None:
+            if ctx.alpha <= -p.alpha_thr and allow["yes"]:   # spot predicted down: our bid is stale
+                allow["yes"] = False
+                self.vetoes["alpha"] += 1
+            if ctx.alpha >= p.alpha_thr and allow["no"]:     # spot predicted up: our ask is stale
+                allow["no"] = False
+                self.vetoes["alpha"] += 1
+        depth = {"yes": book.yes.get(book.best_yes, 0), "no": book.no.get(book.best_no, 0)}
+        for s in ("yes", "no"):
+            other = "no" if s == "yes" else "yes"
+            if p.min_depth is not None and spread <= TICK and depth[s] < p.min_depth * QTY and allow[s]:
+                allow[s] = False
+                self.vetoes["thin"] += 1
+            if p.imb_thr is not None and allow[s] and depth[s] + depth[other] > 0 and \
+                    (depth[other] - depth[s]) / (depth[other] + depth[s]) >= p.imb_thr:
+                allow[s] = False
+                self.vetoes["imbalance"] += 1
+            if p.cluster_ms is not None and allow[s] and rx < self.swept_until[tk][s]:
+                allow[s] = False
+                self.vetoes["cluster"] += 1
         for s in ("yes", "no"):
             o = orders.get(s)
             ok = allow[s] and rx >= self.blocked[tk][s]
+            if not ok and p.keep_if_ahead_lt is not None and o is not None and o.cancel_at is None \
+                    and o.ahead is not None and o.ahead < p.keep_if_ahead_lt * QTY and o.price == want[s] \
+                    and (s == "yes" and pos <= lim or s == "no" and pos >= -lim):
+                ok = True   # near the front: fills here are the benign partials; keep the position
+                self.vetoes["kept_front"] += 1
             if o is not None and o.cancel_at is None and (not ok or o.price != want[s]):
                 o.cancel_at = rx + self.lat
             if ok and (o is None or o.cancel_at is not None) and not any(
@@ -281,8 +331,9 @@ class Quoter:
                     orders[s] = Order(s, want[s], self.p.size * QTY, None, rx + self.lat, improved=spread > TICK)
 
     # ---- summary ---------------------------------------------------------------
-    def summary(self) -> dict:
+    def summary(self, test_from_ns: int = 0) -> dict:
         ms = [r for r in self.pnl.values() if r.mark_pnl is not None]
+        test = [r for r in ms if r.stop_rx >= test_from_ns]
         if not ms:
             return {"name": self.p.name, "markets": 0}
         pnl = [r.mark_pnl for r in ms]
@@ -300,6 +351,11 @@ class Quoter:
             "name": self.p.name,
             "markets": len(ms),
             "pnl_$": sum(pnl),
+            "test_pnl_$": sum(r.mark_pnl for r in test),
+            "test_spread_$": sum(r.spread_capture for r in test),
+            "test_inventory_$": sum(r.inventory_pnl for r in test),
+            "test_markets": len(test),
+            "vetoes": dict(self.vetoes),
             "spread_$": sum(r.spread_capture for r in ms),
             "inventory_$": sum(r.inventory_pnl for r in ms),
             "adverse_10s_$": self.adverse_10s,
@@ -322,37 +378,129 @@ class Quoter:
         }
 
 
+# ------------------------------------------------------------------ context ---
+
+ALPHA_FEATS = ["cb_imb", "cb_micro", "coinbase_flow_1s", "coinbase_flow_5s", "kraken_flow_1s", "kraken_flow_5s",
+               "gemini_btc_flow_5s", "bitstamp_flow_5s", "ret_1s", "ret_5s", "ret_30s", "kr_minus_cb"]
+
+
+def fit_alpha(parquet: Path, train_frac: float = 0.6) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Ridge for unsigned Δspot5s from unsigned spot features, on the first train_frac of sweeps.
+    Returns (w, mu, sd, cutoff_rx_ns). Missing flows are treated as zero."""
+    df = pl.read_parquet(parquet).sort("rx_ns")
+    sign = pl.when(pl.col("taker_side") == "yes").then(1.0).otherwise(-1.0)
+    df = df.with_columns([(pl.col(c).fill_null(0.0) * sign).alias(c) for c in ALPHA_FEATS] + [(pl.col("dspot5") * sign).alias("y")])
+    df = df.filter(pl.col("y").is_not_null())
+    n = df.height
+    cut = int(n * train_frac)
+    X = df.select(ALPHA_FEATS).to_numpy().astype(float)
+    y = df["y"].to_numpy().astype(float)
+    mu, sd = X[:cut].mean(0), X[:cut].std(0) + 1e-12
+    Xs = (X[:cut] - mu) / sd
+    w = np.linalg.solve(Xs.T @ Xs + 10.0 * np.eye(Xs.shape[1]), Xs.T @ y[:cut])
+    pred = ((X[cut:] - mu) / sd) @ w
+    r = np.corrcoef(pred, y[cut:])[0, 1]
+    print(f"alpha fit: train {cut:,} test {n-cut:,}, out-of-sample corr {r:.3f}", file=sys.stderr)
+    return w, mu, sd, int(df["rx_ns"][cut])
+
+
+class Context:
+    """Per-time market context shared by all quoters: predicted spot drift and option Greeks."""
+
+    def __init__(self, spot: SpotState, strikes: dict[str, float], alpha_model):
+        self.spot = spot
+        self.strikes = strikes
+        self.alpha_model = alpha_model
+        self.alpha: float | None = None
+
+    def refresh_alpha(self, rx: int) -> None:
+        if self.alpha_model is None:
+            return
+        f = self.spot.features(rx, 1)
+        if "cb_imb" not in f:
+            return
+        w, mu, sd, _ = self.alpha_model
+        x = np.array([f.get(c, 0.0) for c in ALPHA_FEATS])
+        self.alpha = float(((x - mu) / sd) @ w)
+
+    def delta_sigma10(self, tk: str, close_ns: int) -> float | None:
+        """Price change (fraction of $1) for a 1-sigma spot move over 10s: phi(d) * sqrt(10 / tau)."""
+        K = self.strikes.get(tk)
+        S = self.spot.brti_last
+        vol = self.spot.realized_vol()
+        if not K or not S or not vol:
+            return None
+        tau = max(1.0, (close_ns - self.spot.brti[-1][0]) / 1e9)
+        d = math.log(S / K) / (vol * math.sqrt(tau))
+        return math.exp(-d * d / 2) / math.sqrt(2 * math.pi) * math.sqrt(10 / tau)
+
+
 # ------------------------------------------------------------------- driver ---
 
-def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params]) -> list[dict]:
+def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params],
+        alpha_parquet: Path | None = None) -> tuple[list[dict], int]:
     quoters = [Quoter(p) for p in configs]
     books: dict[str, FastBook] = {}
     closes: dict[str, int] = {}
     ticks: deque = deque()   # (rx_ns, mid)
-    stale_all = True
+    need_ctx = any(p.alpha_thr is not None or p.greeks_cap is not None for p in configs)
+    alpha_model = fit_alpha(alpha_parquet) if (alpha_parquet and any(p.alpha_thr is not None for p in configs)) else None
+    test_from = alpha_model[3] if alpha_model else 0
+    strikes: dict[str, float] = {}
+    if any(p.greeks_cap is not None for p in configs):
+        tickers = sorted({r.raw["msg"]["market_ticker"] for r in iter_records(data_dir, day)
+                          if r.raw.get("type") == "orderbook_snapshot" and r.raw["msg"]["market_ticker"].startswith(series + "-")})
+        strikes = fetch_strikes(tickers)
+    spot = SpotState()
+    ctx = Context(spot, strikes, alpha_model)
+    asset = "ETH" if "ETH" in series else "BTC"
 
-    def quotes():
-        for q in iter_spot(data_dir, venue, day):
-            if isinstance(q, SpotQuote) and q.asset == ("ETH" if "ETH" in series else "BTC"):
-                yield q
+    def spot_events():
+        its = [iter_spot(data_dir, v, day) for v in VENUES]
+        yield from heapq.merge(*its, key=lambda e: e.rx_ns)
+
+    def cb_sizes():
+        for rec in iter_records(data_dir / "spot" / "coinbase", day):
+            raw = rec.raw
+            if raw.get("type") == "ticker" and raw.get("product_id") == "BTC-USD" and raw.get("best_bid_size"):
+                yield ("cbsz", rec.rx_ns, float(raw["best_bid_size"]), float(raw["best_ask_size"]))
 
     n = 0
-    for rec in heapq.merge(iter_records(data_dir, day), quotes(), key=lambda r: r.rx_ns):
+    stream = heapq.merge(iter_records(data_dir, day), spot_events(), cb_sizes(),
+                         key=lambda e: e[1] if isinstance(e, tuple) else e.rx_ns)
+    for rec in stream:
         n += 1
         if n % 5_000_000 == 0:
             print(f"  {n/1e6:.0f}M records", file=sys.stderr)
+        if isinstance(rec, tuple):
+            spot.on_quote_sizes(rec[2], rec[3])
+            continue
         rx = rec.rx_ns
-        if not hasattr(rec, "raw"):
+        if isinstance(rec, SpotTrade):
+            if rec.asset == asset:
+                spot.on_trade(rec)
+            continue
+        if isinstance(rec, SpotQuote):
+            if rec.asset != asset:
+                continue
+            spot.on_quote(rec)
+            if rec.venue != venue:
+                continue
             mid = (rec.bid + rec.ask) / 2
             while ticks and ticks[0][0] < rx - 1_000_000_000:
                 ticks.popleft()
             ago = ticks[0][1] if ticks else None
             ticks.append((rx, mid))
+            if need_ctx:
+                ctx.refresh_alpha(rx)
             live = [tk for tk, b in books.items() if not b.stale]
             for q in quoters:
                 q.on_tick(live, rx, mid, ago)
             continue
         raw = rec.raw
+        if raw.get("type") == "cfbenchmarks_value_5hz" and raw["msg"].get("index_id") == "BRTI":
+            spot.on_brti(rx, float(json.loads(raw["msg"]["data"])["value"]))
+            continue
         t = raw.get("type")
         if t == "_local":
             if raw.get("event") in ("connect", "disconnect"):
@@ -390,9 +538,34 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
             b.stale = True
             continue
         for q in quoters:
-            q.on_delta(tk, rx, msg.get("ts_ms", 0), side, price, before, before + d, b, closes[tk])
-    return [q.summary() for q in quoters]
+            q.on_delta(tk, rx, msg.get("ts_ms", 0), side, price, before, before + d, b, closes[tk], ctx)
+    return [q.summary(test_from) for q in quoters], test_from
 
+
+_F = dict(latency_ms=2, signal_move=2.0, stop_before_s=300, max_pos=200)
+FILTERS2 = [
+    Params("base (2ms, cancel $2/1s, stop 5min, max pos 200)", **_F),
+    Params("mild: alpha $3", **_F, alpha_thr=3.0),
+    Params("mild: imbalance 0.6", **_F, imb_thr=0.6),
+    Params("mild: thin 100", **_F, min_depth=100),
+    Params("mild: alpha $3 + imb 0.6 + thin 100 + greeks 5c", **_F, alpha_thr=3.0, imb_thr=0.6, min_depth=100, greeks_cap=0.05),
+    Params("queue-aware: alpha $1 + imb 0.33, keep if ahead<200", **_F, alpha_thr=1.0, imb_thr=0.33, keep_if_ahead_lt=200),
+    Params("queue-aware: alpha $1 + imb 0.33 + thin 500, keep<200", **_F, alpha_thr=1.0, imb_thr=0.33, min_depth=500, keep_if_ahead_lt=200),
+    Params("queue-aware: all five, keep if ahead<200", **_F, alpha_thr=1.0, greeks_cap=0.05, min_depth=500, imb_thr=0.33, cluster_ms=2000, keep_if_ahead_lt=200),
+    Params("queue-aware: all five, keep if ahead<500", **_F, alpha_thr=1.0, greeks_cap=0.05, min_depth=500, imb_thr=0.33, cluster_ms=2000, keep_if_ahead_lt=500),
+]
+
+FILTERS = [
+    Params("base (2ms, cancel $2/1s, stop 5min, max pos 200)", **_F),
+    Params("+ alpha filter $0.5", **_F, alpha_thr=0.5),
+    Params("+ alpha filter $1", **_F, alpha_thr=1.0),
+    Params("+ greeks cap 5c", **_F, greeks_cap=0.05),
+    Params("+ thin touch veto (<500)", **_F, min_depth=500),
+    Params("+ imbalance veto (0.33)", **_F, imb_thr=0.33),
+    Params("+ cluster veto 2s", **_F, cluster_ms=2000),
+    Params("all: alpha $1 + greeks 5c + thin 500 + imb 0.33 + cluster 2s", **_F, alpha_thr=1.0, greeks_cap=0.05, min_depth=500, imb_thr=0.33, cluster_ms=2000),
+    Params("all but thin", **_F, alpha_thr=1.0, greeks_cap=0.05, imb_thr=0.33, cluster_ms=2000),
+]
 
 INVENTORY = [
     Params(f"max pos {mp}, 2ms, cancel $2/1s, stop 5min", latency_ms=2, signal_move=2.0, stop_before_s=300, max_pos=mp)
@@ -424,9 +597,12 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--sweep", action="store_true", help="run the latency/size sweep instead of the base configs")
     ap.add_argument("--inventory", action="store_true", help="run the position-limit sweep")
+    ap.add_argument("--filters", action="store_true", help="run the adverse-selection filter study (needs research/alpha_<day>.parquet)")
+    ap.add_argument("--filters2", action="store_true", help="milder and queue-aware filter variants")
     a = ap.parse_args()
-    res = run(a.data_dir, a.day, a.series, a.venue, SWEEP if a.sweep else INVENTORY if a.inventory else CONFIGS)
-    cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else CONFIGS
+    res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.day}.parquet")
+    cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
     L = [f"# Quoter simulation, {a.series}, {a.day}", "",
          "Touch quoter, 100 contracts/side unless noted, max position 500, quoting stops 2 min before expiry, inventory marked at mid. "
          "No market impact. See `python/kalshi_data/research/sim.py`.", "",
@@ -438,8 +614,10 @@ def main() -> None:
         cells = []
         for c in cols:
             v = r[c]
-            cells.append(f"{v:,.0f}" if c in ("contracts", "fills", "markets") else f"{v:,.2f}")
+            cells.append(f"{v:,.0f}" if c in ("contracts", "fills", "markets", "test_markets") else f"{v:,.2f}")
         L.append(f"| {r['name']} | " + " | ".join(cells) + " |")
+        if r.get("vetoes"):
+            L.append(f"|  ↳ vetoes: {r['vetoes']} |")
     text = "\n".join(L)
     print(text)
     if a.out:

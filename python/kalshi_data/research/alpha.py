@@ -72,6 +72,8 @@ class SpotState:
         self.flow = {v: Flow() for v in VENUES}
         self.brti: deque = deque()  # (rx_ns, value) last 5 min for realized vol
         self.brti_last = None
+        self._vol = None
+        self._n_brti = 0
 
     def on_quote(self, q: SpotQuote) -> None:
         if q.venue == "coinbase":
@@ -93,6 +95,9 @@ class SpotState:
         self.brti_last = v
         while self.brti and self.brti[0][0] < rx - 300_000_000_000:
             self.brti.popleft()
+        self._n_brti += 1
+        if self._n_brti % 25 == 0:   # refresh the cached vol every ~5s of ticks
+            self._vol = self._realized_vol()
 
     def mid_ago(self, rx: int, s: float) -> float | None:
         lo = rx - int(s * 1e9)
@@ -105,7 +110,10 @@ class SpotState:
         return (self.cb_bid + self.cb_ask) / 2 if self.cb_bid else None
 
     def realized_vol(self) -> float | None:
-        """Annualized-free: std of 1s BRTI log returns over the last 5 min, per sqrt(second)."""
+        return self._vol
+
+    def _realized_vol(self) -> float | None:
+        """std of BRTI log returns over the last 5 min, scaled to per sqrt(second)."""
         if len(self.brti) < 30:
             return None
         vals = [v for _, v in self.brti]

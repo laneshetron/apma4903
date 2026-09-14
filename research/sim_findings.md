@@ -110,3 +110,32 @@ continuous skew (Avellaneda-Stoikov / GLFT reservation price, threshold-
 shaped by the 1c tick) plus a receding-horizon endgame unwind is the
 candidate to beat this baseline: target the ~$56/market of the 300 limit
 at the $18-36 sd of the 100-200 limits.
+
+## Adverse-selection filters in the sim (2ms, cancel $2/1s, stop 5 min, max pos 200)
+
+Signals from `alpha_2026-09-14.md` used as presence rules (don't rest a side
+when flagged). Tables: `sim_2026-09-14_filters.md`, `sim_2026-09-14_filters2.md`.
+
+| rule | day P&L | spread | adverse | c/contract | fill share |
+|---|---|---|---|---|---|
+| base | $2,447 | $6,438 | −$3,993 | 0.16 | 1.55% |
+| alpha tail cut ($3 over 5s) | $2,485 | $5,997 | −$3,513 | 0.18 | 1.44% |
+| Greeks cap (delta x sigma10 >= 5c) | $2,328 | $5,570 | −$3,243 | 0.17 | 1.37% |
+| thin-touch veto (< 100) | $2,172 | $4,580 | −$2,407 | 0.20 | 1.11% |
+| imbalance veto (0.6) | $2,188 | $2,461 | −$270 | 0.35 | 0.63% |
+| imbalance veto (0.33) | $1,784 | $1,472 | +$313 | 0.47 | 0.39% |
+| all five, queue-aware keep | $724–775 | $768–839 | −$44–64 | 0.43 | 0.17% |
+
+The signals work: the adverse term can be driven to zero. Total P&L does
+not improve because (1) the vetoed flow is net positive (0.37c spread vs
+~0.25c adverse), so a veto gives up more than it saves, and (2) every veto
+resets queue position in a FIFO market; queues are thousands deep so a
+"keep if near the front" exception rarely applies.
+
+Conclusion: use toxicity signals to modulate size and skew (continuous, no
+queue reset) and gate presence only in the extreme tail. Keep the alpha
+tail cut and the Greeks cap (P&L-neutral, better quality, principled
+endgame). The signals matter most at larger size (fills constrained by our
+own impact) and on worse-than-today adverse-selection days — this is a
+quality/quantity frontier whose right operating point depends on capacity
+and regime.
