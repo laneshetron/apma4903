@@ -73,6 +73,11 @@ class MarketPnL:
     market_volume: int = 0
     buy_cost: float = 0.0   # dollars paid for buys
     sell_proceeds: float = 0.0
+    spread_capture: float = 0.0   # dollars: sum over fills of (mid - price) * qty, signed
+    inventory_pnl: float = 0.0    # dollars: sum over time of pos * d(mid)
+    last_mid: float | None = None # cents
+    pre_mid: float | None = None  # mid before the first delta of the current ts_ms (pre-sweep)
+    last_ts: int = -1
     improved_fills: int = 0  # fills on a quote that improved the touch (alone at the front)
 
 
@@ -86,8 +91,9 @@ class Quoter:
         self.pnl: dict[str, MarketPnL] = {}
         self.blocked: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": 0, "no": 0})  # side -> rx_ns until which quoting is off
         self.stopped: set[str] = set()
-        self.fill_mo: deque = deque()   # (deadline_ns, ticker, sign, price_cents) for 30s markouts of our fills
-        self.fill_markouts: list[tuple[float, int]] = []  # (markout cents, qty)
+        self.fill_mo: deque = deque()   # (deadline_ns, ticker, sign, price_cents, qty, horizon) for markouts of our fills
+        self.fill_markouts: dict[int, list[tuple[float, int]]] = {10: [], 30: []}  # horizon -> (markout cents, qty)
+        self.adverse_10s: float = 0.0   # dollars: mid move in the 10s after our fills, signed (negative = adverse)
 
     # ---- helpers -----------------------------------------------------------
     def m(self, tk: str) -> MarketPnL:
@@ -105,20 +111,32 @@ class Quoter:
         r.fills += 1
         if o.improved:
             r.improved_fills += 1
+        mid = r.pre_mid if r.pre_mid is not None else r.last_mid  # cents, pre-sweep
         if o.side == "yes":       # our YES bid was hit: we buy YES at price
             cost = o.price / ONE * qty / QTY
             r.cash -= cost
             r.buy_cost += cost
             r.pos += qty
             r.bought += qty
-            self.fill_mo.append((rx + 30_000_000_000, tk, -1, o.price / 100, qty))
+            px, sign = o.price / 100, -1
         else:                     # our NO bid was hit: we sell YES at ONE - price
             proceeds = (ONE - o.price) / ONE * qty / QTY
             r.cash += proceeds
             r.sell_proceeds += proceeds
             r.pos -= qty
             r.sold += qty
-            self.fill_mo.append((rx + 30_000_000_000, tk, 1, (ONE - o.price) / 100, qty))
+            px, sign = (ONE - o.price) / 100, 1
+        if mid is not None:
+            # spread capture is measured against the pre-sweep mid; inventory P&L then
+            # starts from that same mid so the two parts sum to the total
+            r.spread_capture += sign * (px - mid) / 100 * qty / QTY
+            if r.last_mid is not None and r.last_mid != mid:
+                # the sweep's own delta moved the mid before the trade message arrived and
+                # inventory P&L was booked on the pre-fill position; re-book that move on
+                # the filled quantity so spread + inventory == total
+                r.inventory_pnl += (-sign * qty / QTY) * (r.last_mid - mid) / 100
+        for h in (10, 30):
+            self.fill_mo.append((rx + h * 1_000_000_000, tk, sign, px, qty, h, mid))
         r.max_abs_pos = max(r.max_abs_pos, abs(r.pos))
         if o.remaining == 0:
             self.orders[tk].pop(o.side, None)
@@ -139,19 +157,33 @@ class Quoter:
             # pessimistic: cancels come from behind us; ahead unchanged
 
     # ---- events --------------------------------------------------------------
-    def on_snapshot(self, tk: str) -> None:
+    def on_snapshot(self, tk: str, book: FastBook) -> None:
         self.orders[tk].clear()   # book was rebuilt; treat our orders as cancelled
+        r = self.m(tk)
+        r.last_mid = book.mid()   # no inventory P&L is booked across a stale gap
+        r.pre_mid = r.last_mid
 
     def resolve_markouts(self, tk: str, rx: int, book: FastBook) -> None:
         while self.fill_mo and self.fill_mo[0][0] <= rx:
-            _, t, sign, px, q = self.fill_mo.popleft()
-            # approximate: use this ticker's mid if it is the same market, else skip
-            if t == tk:
-                mid = book.mid()
-                if mid is not None:
-                    self.fill_markouts.append((sign * (px - mid), q))
+            _, t, sign, px, q, h, mid0 = self.fill_mo.popleft()
+            r = self.pnl.get(t)
+            mid = book.mid() if t == tk else (r.last_mid if r else None)
+            if mid is not None:
+                self.fill_markouts[h].append((sign * (px - mid), q))
+                if h == 10 and mid0 is not None:
+                    # mid move in the 10s after the fill, on the filled quantity: the
+                    # adverse-selection slice of inventory P&L (negative = moved against us)
+                    self.adverse_10s += sign * (mid0 - mid) / 100 * q / QTY
 
     def on_delta(self, tk: str, rx: int, ts_ms: int, side: str, price: int, before: int, after: int, book: FastBook, close_ns: int) -> None:
+        r = self.m(tk)
+        mid = book.mid()
+        if ts_ms != r.last_ts:
+            r.pre_mid, r.last_ts = r.last_mid, ts_ms
+        if mid is not None and r.last_mid is not None and tk not in self.stopped:
+            r.inventory_pnl += (r.pos / QTY) * (mid - r.last_mid) / 100
+        if mid is not None:
+            r.last_mid = mid
         self.resolve_markouts(tk, rx, book)
         o = self.orders[tk].get(side)
         if o is not None and o.price == price:
@@ -263,11 +295,14 @@ class Quoter:
                 matched = min(r.bought, r.sold)
                 realized += matched / QTY * (r.sell_proceeds / (r.sold / QTY) - r.buy_cost / (r.bought / QTY))
         sd = st.pstdev(pnl) if len(pnl) > 1 else 0.0
-        fm = self.fill_markouts
+        fm = self.fill_markouts[30]
         return {
             "name": self.p.name,
             "markets": len(ms),
             "pnl_$": sum(pnl),
+            "spread_$": sum(r.spread_capture for r in ms),
+            "inventory_$": sum(r.inventory_pnl for r in ms),
+            "adverse_10s_$": self.adverse_10s,
             "realized_$": realized,
             "unrealized_$": sum(pnl) - realized,
             "pnl_per_market_$": st.mean(pnl),
@@ -340,7 +375,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
         if t == "orderbook_snapshot":
             b.snapshot(msg)
             for q in quoters:
-                q.on_snapshot(tk)
+                q.on_snapshot(tk, b)
             continue
         if t == "trade":
             for q in quoters:
@@ -385,7 +420,7 @@ def main() -> None:
     ap.add_argument("--sweep", action="store_true", help="run the latency/size sweep instead of the base configs")
     a = ap.parse_args()
     res = run(a.data_dir, a.day, a.series, a.venue, SWEEP if a.sweep else CONFIGS)
-    cols = ["markets", "pnl_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
+    cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
     L = [f"# Quoter simulation, {a.series}, {a.day}", "",
          "Touch quoter, 100 contracts/side unless noted, max position 500, quoting stops 2 min before expiry, inventory marked at mid. "
          "No market impact. See `python/kalshi_data/research/sim.py`.", "",

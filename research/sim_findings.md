@@ -5,7 +5,7 @@ Tables: `sim_2026-09-14.md`, `sim_2026-09-14_sweep.md`.
 
 ## Base configs (100 contracts/side, max position 500)
 
-| config | P&L | realized | unrealized | t (46 mkts) | c/contract | fill share |
+| config | P&L | matched round trips | remainder | t (46 mkts) | c/contract | fill share |
 |---|---|---|---|---|---|---|
 | home 40ms, no signal | −$547 | −$1,406 | +$860 | −0.7 | −0.03 | 2.6% |
 | AWS 2ms, no signal | +$1,832 | +$573 | +$1,258 | 2.7 | +0.06 | 4.0% |
@@ -42,9 +42,25 @@ assumption is clearly violated.
   numbers held (they will not hold fully; see caveats). Own-fill 30s markout is
   +0.1 to +0.2c, versus −0.56c for a back-of-queue order: queue position and
   cancel-on-signal convert the toxic flow problem into a manageable one.
-- Roughly half the P&L is realized round-trip spread; the other half is a
-  consistently positive inventory mark, i.e. accumulating against noise flow
-  is itself a mean-reversion trade. That half is the more fragile.
+- Decomposition (per fill, against the pre-sweep mid): spread capture is the
+  half-spread, ~0.37c/contract, on every fill; inventory P&L (position x mid
+  moves afterwards) is NEGATIVE in every config, −0.2 to −0.4c/contract, and
+  almost entirely within 10s of the fill. There is no mean-reversion gain.
+  The net edge is the residual: 0.37c earned minus ~0.25c given back.
+
+  | config | spread | inventory | of which <10s | net c/contract |
+  |---|---|---|---|---|
+  | home 40ms, no rules | +$7,865 | −$8,307 | −$9,795 | −0.02 |
+  | AWS 2ms, no rules | +$12,235 | −$10,298 | −$10,579 | +0.06 |
+  | AWS 2ms, cancel $2/1s | +$9,286 | −$6,517 | −$6,573 | +0.11 |
+  | … + stop 5 min | +$7,319 | −$4,129 | −$4,077 | +0.19 |
+
+  Every lever (latency, cancel-on-signal, endgame stop) works by shrinking
+  the adverse term. A ~30% rise in adverse selection — e.g. from our own
+  market impact — erases the edge; that is the scale on which the no-impact
+  caveat matters. (An earlier realized/unrealized split in this file
+  suggested a positive inventory mark; that was an artefact of pairing buys
+  with later sells and is superseded by this decomposition.)
 - Stopping 5 min before expiry beats 2 min: the endgame is where losses sit.
 - Home latency without the extra rules loses; with them it is marginally
   positive but fragile (t~2).
