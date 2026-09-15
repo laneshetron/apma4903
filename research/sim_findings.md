@@ -203,3 +203,20 @@ filters and below the edge join gate (P&L −11% to −30%, c/contract 0.19–0.
 vetoes lopsided toward the bid by the +1.15c bias). Roles that remain:
 Greeks for regime and inventory skew, position valuation and the endgame
 mechanics, and a small drift term in the reservation price.
+
+## Fair value tails and delta-scaled repricing (sim --dfair, --dfair2)
+
+Tail check (`fair.py` + standardized realized outcomes): vol level is right
+(implied 0.64 vs realized 0.57-0.65 bp/sqrt-s; std of standardized outcomes
+1.03) but the shape is not normal: fewer moderate moves, fatter tails, and
+the market prices ~t(3-4)-like tails (P(YES | 2-sigma strike) 3.6% vs 0.8%
+normal). |fair - mid| (~3.5c) does not scale with delta -> model-form error
+in the tails, not reference-price noise.
+
+Delta-scaled repricing (cancel when fair moved >= 0.25-1c against the
+quote, Coinbase spot, normal or fat-tailed kernel): $2,605-2,943 vs $2,994
+for the flat "$2 spot move in 1s" rule; adverse -5.8k to -7.2k vs -4.8k.
+The flat rule works as a market-wide toxicity signal (informed flow active
+now), not as a staleness correction; a corrected kernel does not change
+adverse selection. Keep the tail fix for Greeks, inventory valuation and
+the endgame.

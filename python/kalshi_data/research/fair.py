@@ -51,7 +51,7 @@ class SpotSeries:
 
     def add(self, t_s: float, v: float) -> None:
         self.ticks.append((t_s, v))
-        while self.ticks and self.ticks[0][0] < t_s - max(self.vol_window, WINDOW_S) - 1:
+        while self.ticks and self.ticks[0][0] < t_s - max(self.vol_window, WINDOW_S, 3600.0) - 1:
             self.ticks.popleft()
         self._n += 1
         if self._n % 25 == 0:
@@ -85,6 +85,26 @@ class SpotSeries:
     def vol(self) -> float | None:
         return self._vol
 
+    def vol_lh(self, interval_s: float = 60.0, window_s: float = 3600.0) -> float | None:
+        """Realized vol per sqrt(second) from returns over `interval_s`, sampled every interval
+        across `window_s` (robust to the short-horizon autocorrelation of a smoothed index)."""
+        if not self.ticks:
+            return None
+        t_end = self.ticks[-1][0]
+        pts = [(t, v) for t, v in self.ticks if t >= t_end - window_s]
+        if len(pts) < 10:
+            return None
+        vals, j, t = [], 0, pts[0][0]
+        while t <= t_end:
+            while j + 1 < len(pts) and pts[j + 1][0] <= t:
+                j += 1
+            vals.append(pts[j][1])
+            t += interval_s
+        if len(vals) < 10:
+            return None
+        r = np.diff(np.log(np.array(vals)))
+        return float(np.std(r) / math.sqrt(interval_s))
+
     def window_integral(self, t_from: float, t_to: float) -> float | None:
         """Integral of the series over [t_from, t_to] (piecewise constant), or None if not covered."""
         if not self.ticks or self.ticks[0][0] > t_from:
@@ -104,7 +124,17 @@ class SpotSeries:
         return total
 
 
-def fair_value(spot: SpotSeries, K: float, t_s: float, close_s: float, sigma: float | None = None) -> float | None:
+def kernel_cdf(x: float, kernel: str = "normal") -> float:
+    """P(Z <= x) for the standardized return. 'mixture' is a 3-component scale mixture with
+    unit variance (weights .6/.3/.1 at scales .7/1.2/2.2), a crude fat-tailed alternative."""
+    if kernel == "normal":
+        return norm_cdf(x)
+    w = ((0.6, 0.7), (0.3, 1.2), (0.1, 2.2))
+    v = sum(wi * si * si for wi, si in w)
+    return sum(wi * norm_cdf(x / (si / math.sqrt(v))) for wi, si in w)
+
+
+def fair_value(spot: SpotSeries, K: float, t_s: float, close_s: float, sigma: float | None = None, kernel: str = "normal") -> float | None:
     S = spot.last()
     sigma = sigma if sigma is not None else spot.vol()
     if S is None or sigma is None or K <= 0:
@@ -114,13 +144,13 @@ def fair_value(spot: SpotSeries, K: float, t_s: float, close_s: float, sigma: fl
         return None
     if tau >= WINDOW_S:
         sd = S * sigma * math.sqrt(tau - WINDOW_S + WINDOW_S / 3)
-        return norm_cdf((S - K) / sd) if sd > 0 else (1.0 if S >= K else 0.0)
+        return kernel_cdf((S - K) / sd, kernel) if sd > 0 else (1.0 if S >= K else 0.0)
     known = spot.window_integral(close_s - WINDOW_S, t_s)
     if known is None:
         known = S * (WINDOW_S - tau)
     mean = (known + S * tau) / WINDOW_S
     sd = S * sigma * tau ** 1.5 / math.sqrt(3) / WINDOW_S
-    return norm_cdf((mean - K) / sd) if sd > 0 else (1.0 if mean >= K else 0.0)
+    return kernel_cdf((mean - K) / sd, kernel) if sd > 0 else (1.0 if mean >= K else 0.0)
 
 
 # ------------------------------------------------------------- validation ---
@@ -196,6 +226,10 @@ def build(data_dir: Path, day: date, series: str) -> pl.DataFrame:
             K = strikes[tk]
             rows.append({
                 "ticker": tk, "t_s": t_s, "tau_s": closes[tk] - t_s, "mid": mid / 100,
+                "S_brti": brti.last(), "S_cb": cb.last(), "K": K,
+                "vol_brti_lh_bp": (brti.vol_lh() or float("nan")) * 1e4, "vol_cb_lh_bp": (cb.vol_lh() or float("nan")) * 1e4,
+                "fair_brti_lh": fair_value(brti, K, t_s, closes[tk], sigma=brti.vol_lh()),
+                "fair_cb_lh": fair_value(cb, K, t_s, closes[tk], sigma=cb.vol_lh()),
                 "fair_brti": fair_value(brti, K, t_s, closes[tk]),
                 "fair_cb": fair_value(cb, K, t_s, closes[tk]),
                 "fair_cb_brtivol": fair_value(cb, K, t_s, closes[tk], sigma=brti.vol()),
@@ -213,9 +247,26 @@ def build(data_dir: Path, day: date, series: str) -> pl.DataFrame:
 
 def analyze(df: pl.DataFrame) -> str:
     L = [f"# Fair value validation ({df.height:,} market-seconds, {df['ticker'].n_unique()} markets)", ""]
-    L.append(f"Realized vol (bp per sqrt-second): BRTI median {df['vol_brti_bp'].median():.2f}, Coinbase median {df['vol_cb_bp'].median():.2f}")
+    L.append(f"Realized vol (bp per sqrt-second): BRTI 1s/5min median {df['vol_brti_bp'].median():.2f}, Coinbase 1s/5min {df['vol_cb_bp'].median():.2f}, "
+             f"BRTI 1min/60min {df['vol_brti_lh_bp'].median():.2f}, Coinbase 1min/60min {df['vol_cb_lh_bp'].median():.2f}")
+    # market-implied vol: solve Phi((S-K)/(S sigma sqrt(tau_eff))) = mid for rows with 0.1 < mid < 0.9, tau >= 120s
+    from statistics import NormalDist
+    nd = NormalDist()
+    imp = df.filter((pl.col("mid") > 0.1) & (pl.col("mid") < 0.9) & (pl.col("tau_s") >= 120) & pl.col("S_brti").is_not_null())
+    if imp.height:
+        z = np.array([nd.inv_cdf(m) for m in imp["mid"].to_numpy()])
+        S, K, tau = imp["S_brti"].to_numpy(), imp["K"].to_numpy(), imp["tau_s"].to_numpy()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sig = (S - K) / (S * np.sqrt(tau - 40.0) * z)
+        ok = np.isfinite(sig) & (sig > 0) & (np.abs(z) > 0.3)
+        sig = sig[ok] * 1e4
+        L.append(f"Market-implied vol from the mid (bp/sqrt-s, rows with 0.1<mid<0.9, |z|>0.3, tau>=2min; n={ok.sum():,}): "
+                 f"median {np.median(sig):.2f}, IQR {np.percentile(sig,25):.2f}-{np.percentile(sig,75):.2f}")
+        rz = imp.filter(pl.Series(ok)).with_columns(pl.Series("sig", sig))
+        by_hour = rz.with_columns(((pl.col("t_s") // 3600) % 24).alias("h")).group_by("h").agg(pl.col("sig").median().alias("implied"), pl.col("vol_brti_bp").median().alias("realized_1s5m"), pl.col("vol_brti_lh_bp").median().alias("realized_1m60m")).sort("h")
+        L.append("  by hour (UTC): " + ", ".join(f"{int(r['h']):02d}h impl {r['implied']:.2f} / rlz1s {r['realized_1s5m']:.2f} / rlz1m {r['realized_1m60m']:.2f}" for r in by_hour.iter_rows(named=True)))
     L.append("")
-    for col in ("fair_brti", "fair_cb", "fair_cb_brtivol"):
+    for col in ("fair_brti", "fair_cb", "fair_cb_brtivol", "fair_brti_lh", "fair_cb_lh"):
         d = df.filter(pl.col(col).is_not_null() & (pl.col("tau_s") > 30))
         x, y = d[col].to_numpy(), d["mid"].to_numpy()
         A = np.vstack([x, np.ones_like(x)]).T

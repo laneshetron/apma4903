@@ -68,6 +68,12 @@ class Params:
     fair_gap_thr: float | None = None       # presence rule: cancel/avoid the overpriced side
     fair_gap_join: float | None = None      # join-only rule: don't place on the overpriced side, hold existing orders
     vol_mult: float = 1.0                   # scale realized vol in the fair value model
+    # delta-scaled repricing: cancel a side when fair value has moved against it by >= this many cents
+    # since the order was placed (replaces the flat "$X spot move" cancel-on-signal rule)
+    dfair_cancel_c: float | None = None
+    fair_spot: str = "coinbase"             # spot series driving fair for the repricing rule: coinbase | brti
+    dfair_window_s: float | None = None     # if set, compare fair now vs fair this many seconds ago instead of since placement
+    kernel: str = "normal"                  # normal | mixture (fat-tailed)
 
 
 @dataclass(slots=True)
@@ -80,6 +86,7 @@ class Order:
     cancel_at: int | None = None  # rx_ns when a cancel lands
     improved: bool = False        # placed one tick inside the touch
     last_seen: int = 0            # rx_ns of the last probe update
+    fair_at_place: float | None = None  # fair (cents) when placed, for delta-scaled repricing
     filled_any: bool = False
     unexplained: deque = field(default_factory=deque)  # (rx_ns, ts_ms, qty) negative deltas awaiting a trade
 
@@ -126,6 +133,7 @@ class Quoter:
         self.probe_ahead_at_fill: list[float] = []
         self.probe_ahead_at_place: list[float] = []
         self.edge_blocked: dict[str, dict[str, bool]] = defaultdict(lambda: {"yes": False, "no": False})
+        self.fair_hist: dict[str, deque] = defaultdict(deque)   # ticker -> (rx_ns, fair_c) for the window variant
         self.fill_mo: deque = deque()   # (deadline_ns, ticker, sign, price_cents, qty, horizon) for markouts of our fills
         self.fill_markouts: dict[int, list[tuple[float, int]]] = {10: [], 30: []}  # horizon -> (markout cents, qty)
         self.adverse_10s: float = 0.0   # dollars: mid move in the 10s after our fills, signed (negative = adverse)
@@ -275,7 +283,39 @@ class Quoter:
             o.ahead = 0
             self._fill(tk, o, spill, rx)
 
-    def on_tick(self, tk_list: list[str], rx: int, mid: float, mid_1s_ago: float | None) -> None:
+    def on_tick(self, tk_list: list[str], rx: int, mid: float, mid_1s_ago: float | None, ctx: "Context | None" = None) -> None:
+        if self.p.dfair_cancel_c is not None and ctx is not None:
+            for tk in tk_list:
+                close_ns = ctx.closes.get(tk)
+                if close_ns is None:
+                    continue
+                f = ctx.fair_c(tk, rx, close_ns, self.p.fair_spot, self.p.vol_mult, self.p.kernel)
+                if f is None:
+                    continue
+                ref = None
+                if self.p.dfair_window_s is not None:
+                    h = self.fair_hist[tk]
+                    h.append((rx, f))
+                    lo = rx - int(self.p.dfair_window_s * 1e9)
+                    while len(h) > 1 and h[1][0] <= lo:
+                        h.popleft()
+                    ref = h[0][1] if h[0][0] <= lo else None
+                for s, o in list(self.orders[tk].items()):
+                    if o.cancel_at is not None:
+                        continue
+                    if self.p.dfair_window_s is None:
+                        if o.fair_at_place is None:
+                            o.fair_at_place = f
+                            continue
+                        d = f - o.fair_at_place
+                    else:
+                        if ref is None:
+                            break
+                        d = f - ref
+                    # fair up -> our ask (NO bid) is stale; fair down -> our bid is stale
+                    if (s == "no" and d >= self.p.dfair_cancel_c) or (s == "yes" and -d >= self.p.dfair_cancel_c):
+                        o.cancel_at = rx + self.lat
+                        self.vetoes["dfair"] += 1
         if self.p.signal_move is None or mid_1s_ago is None:
             return
         d = mid - mid_1s_ago
@@ -408,6 +448,8 @@ class Quoter:
                 # place: becomes live after latency; replaces a cancelled order once it lands
                 if o is None or rx >= o.cancel_at:
                     orders[s] = Order(s, want[s], self.p.size * QTY, None, rx + self.lat, improved=spread > TICK)
+                    if p.dfair_cancel_c is not None and ctx is not None:
+                        orders[s].fair_at_place = ctx.fair_c(tk, rx, close_ns, p.fair_spot, p.vol_mult, p.kernel)
 
     # ---- summary ---------------------------------------------------------------
     def summary(self, test_from_ns: int = 0) -> dict:
@@ -562,6 +604,7 @@ class Context:
     """Per-time market context shared by all quoters: predicted spot drift and option Greeks."""
 
     def __init__(self, spot: SpotState, strikes: dict[str, float], alpha_model, edge_model: EdgeModel | None = None):
+        self.closes: dict[str, int] = {}
         self.spot = spot
         self.strikes = strikes
         self.alpha_model = alpha_model
@@ -569,6 +612,18 @@ class Context:
         self.alpha: float | None = None
 
     brti_series: SpotSeries | None = None
+    cb_series: SpotSeries | None = None
+
+    def fair_c(self, tk: str, t_ns: int, close_ns: int, spot: str, vol_mult: float = 1.0, kernel: str = "normal") -> float | None:
+        K = self.strikes.get(tk)
+        ser = self.cb_series if spot == "coinbase" else self.brti_series
+        if not K or ser is None:
+            return None
+        vol = ser.vol()
+        if vol is None:
+            return None
+        f = fair_value(ser, K, t_ns / 1e9, close_ns / 1e9, sigma=vol * vol_mult, kernel=kernel)
+        return None if f is None else f * 100
 
     def fair_gap_c(self, tk: str, book: FastBook, rx: int, close_ns: int, vol_mult: float) -> float | None:
         """fair - mid in cents, from the BRTI-based settlement-aware model."""
@@ -621,7 +676,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
     books: dict[str, FastBook] = {}
     closes: dict[str, int] = {}
     ticks: deque = deque()   # (rx_ns, mid)
-    need_fair = any(p.fair_gap_thr is not None or p.fair_gap_join is not None for p in configs)
+    need_fair = any(p.fair_gap_thr is not None or p.fair_gap_join is not None or p.dfair_cancel_c is not None for p in configs)
     need_ctx = need_fair or any(p.alpha_thr is not None or p.greeks_cap is not None or p.edge_theta is not None or p.join_theta is not None for p in configs)
     alpha_model = fit_alpha(alpha_parquet) if (alpha_parquet and any(p.alpha_thr is not None for p in configs)) else None
     test_from = alpha_model[3] if alpha_model else 0
@@ -637,6 +692,8 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
     ctx = Context(spot, strikes, alpha_model, edge_model)
     if need_fair:
         ctx.brti_series = SpotSeries()
+        ctx.cb_series = SpotSeries()
+    ctx.closes = closes
     asset = "ETH" if "ETH" in series else "BTC"
 
     def spot_events():
@@ -671,6 +728,8 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
             if rec.venue != venue:
                 continue
             mid = (rec.bid + rec.ask) / 2
+            if ctx.cb_series is not None:
+                ctx.cb_series.add(rx / 1e9, mid)
             while ticks and ticks[0][0] < rx - 1_000_000_000:
                 ticks.popleft()
             ago = ticks[0][1] if ticks else None
@@ -679,7 +738,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
                 ctx.refresh_alpha(rx)
             live = [tk for tk, b in books.items() if not b.stale]
             for q in quoters:
-                q.on_tick(live, rx, mid, ago)
+                q.on_tick(live, rx, mid, ago, ctx)
             continue
         raw = rec.raw
         if raw.get("type") == "cfbenchmarks_value_5hz" and raw["msg"].get("index_id") == "BRTI":
@@ -748,6 +807,26 @@ FAIR = [
     Params("fair gap join-only rule, thr 3c", **_G, stop_before_s=300, fair_gap_join=3.0),
     Params("fair gap join-only 3c + edge join gate 0", **_G, stop_before_s=300, fair_gap_join=3.0, join_theta=0.0),
     Params("fair gap join-only 3c, vol x1.25", **_G, stop_before_s=300, fair_gap_join=3.0, vol_mult=1.25),
+]
+
+_H = dict(latency_ms=2, stop_before_s=300, max_pos=200)
+DFAIR2 = [
+    Params("flat rule: spot move $2/1s", **_H, signal_move=2.0),
+    Params("delta-scaled, 1s window, >= 0.25c", **_H, dfair_cancel_c=0.25, dfair_window_s=1.0),
+    Params("delta-scaled, 1s window, >= 0.5c", **_H, dfair_cancel_c=0.5, dfair_window_s=1.0),
+    Params("delta-scaled, 1s window, >= 0.25c, fat-tailed kernel", **_H, dfair_cancel_c=0.25, dfair_window_s=1.0, kernel="mixture"),
+    Params("delta-scaled, 1s window, >= 0.5c, fat-tailed kernel", **_H, dfair_cancel_c=0.5, dfair_window_s=1.0, kernel="mixture"),
+    Params("delta-scaled 1s 0.25c fat-tailed + flat $2", **_H, dfair_cancel_c=0.25, dfair_window_s=1.0, kernel="mixture", signal_move=2.0),
+]
+
+DFAIR = [
+    Params("no cancel-on-signal", **_H),
+    Params("flat rule: spot move $2/1s (previous base)", **_H, signal_move=2.0),
+    Params("delta-scaled: cancel when fair moved >= 0.25c against quote", **_H, dfair_cancel_c=0.25),
+    Params("delta-scaled: >= 0.5c", **_H, dfair_cancel_c=0.5),
+    Params("delta-scaled: >= 1c", **_H, dfair_cancel_c=1.0),
+    Params("delta-scaled 0.5c + flat $2/1s", **_H, dfair_cancel_c=0.5, signal_move=2.0),
+    Params("delta-scaled 0.5c, BRTI spot", **_H, dfair_cancel_c=0.5, fair_spot="brti"),
 ]
 
 PROBE = [
@@ -832,8 +911,10 @@ def main() -> None:
     ap.add_argument("--probe", action="store_true", help="measure queue advancement and time-to-fill of our orders")
     ap.add_argument("--join", action="store_true", help="join-gating study")
     ap.add_argument("--fair", action="store_true", help="fair-value gap rules study")
+    ap.add_argument("--dfair", action="store_true", help="delta-scaled repricing study")
+    ap.add_argument("--dfair2", action="store_true", help="delta-scaled repricing, 1s window and fat-tailed kernel")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.day}.parquet")
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
     L = [f"# Quoter simulation, {a.series}, {a.day}", "",
