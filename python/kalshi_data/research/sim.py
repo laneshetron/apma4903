@@ -62,6 +62,7 @@ class Params:
     # expected edge from (queue position, state) is below -edge_theta for at least edge_debounce_ms
     edge_theta: float | None = None
     edge_debounce_ms: float = 0.0
+    join_theta: float | None = None   # only JOIN/PLACE when expected edge at the placement queue position >= -join_theta
 
 
 @dataclass(slots=True)
@@ -73,6 +74,8 @@ class Order:
     active_from: int   # rx_ns when the order is live
     cancel_at: int | None = None  # rx_ns when a cancel lands
     improved: bool = False        # placed one tick inside the touch
+    last_seen: int = 0            # rx_ns of the last probe update
+    filled_any: bool = False
     unexplained: deque = field(default_factory=deque)  # (rx_ns, ts_ms, qty) negative deltas awaiting a trade
 
 
@@ -112,6 +115,11 @@ class Quoter:
         self.swept_until: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": 0, "no": 0})
         self.vetoes: dict[str, int] = defaultdict(int)  # reason -> count of (side, requote) decisions blocked
         self.adverse_since: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": -1, "no": -1})
+        self.probe_adv_qty = 0.0     # contracts by which live orders advanced
+        self.probe_live_s = 0.0      # live-order seconds
+        self.probe_ttf: list[float] = []      # seconds from activation to (first) fill
+        self.probe_ahead_at_fill: list[float] = []
+        self.probe_ahead_at_place: list[float] = []
         self.edge_blocked: dict[str, dict[str, bool]] = defaultdict(lambda: {"yes": False, "no": False})
         self.fill_mo: deque = deque()   # (deadline_ns, ticker, sign, price_cents, qty, horizon) for markouts of our fills
         self.fill_markouts: dict[int, list[tuple[float, int]]] = {10: [], 30: []}  # horizon -> (markout cents, qty)
@@ -211,14 +219,23 @@ class Quoter:
         if o is not None and o.price == price:
             if o.ahead is None and rx >= o.active_from:
                 o.ahead = before  # activate: everything resting is ahead of us
+                o.last_seen = rx
+                self.probe_ahead_at_place.append(before / QTY)
             elif o.ahead is not None and after < before:
                 o.unexplained.append((rx, ts_ms, before - after))
             elif o.ahead is None and after > before:
                 pass  # arrivals before activation are ahead of us anyway
         for oo in self.orders[tk].values():
+            prev_ahead = oo.ahead
             self._flush_unexplained(oo, rx, book)
             if oo.ahead is None and rx >= oo.active_from:
                 oo.ahead = book.side(oo.side).get(oo.price, 0)
+                oo.last_seen = rx
+                self.probe_ahead_at_place.append(oo.ahead / QTY)
+            elif oo.ahead is not None and prev_ahead is not None:
+                self.probe_adv_qty += max(0, prev_ahead - oo.ahead) / QTY
+                self.probe_live_s += (rx - oo.last_seen) / 1e9
+                oo.last_seen = rx
         self._requote(tk, rx, book, close_ns, ctx)
 
     def on_trade(self, tk: str, rx: int, ts_ms: int, taker_side: str, yes_price: int, qty: int, book: FastBook) -> None:
@@ -241,9 +258,15 @@ class Quoter:
             else:
                 o.unexplained[0] = (r0, t0, q - take)
         if qty <= o.ahead:
+            self.probe_adv_qty += qty / QTY
             o.ahead -= qty
         else:
             spill = qty - o.ahead
+            self.probe_adv_qty += o.ahead / QTY
+            if not o.filled_any:
+                o.filled_any = True
+                self.probe_ttf.append((rx - o.active_from) / 1e9)
+                self.probe_ahead_at_fill.append(o.ahead / QTY)
             o.ahead = 0
             self._fill(tk, o, spill, rx)
 
@@ -355,6 +378,14 @@ class Quoter:
             if ok and (o is None or o.cancel_at is not None) and not any(
                 x.side == s and x.cancel_at is None for x in orders.values()
             ):
+                if p.join_theta is not None and ctx is not None and ctx.edge_model is not None:
+                    other = "no" if s == "yes" else "yes"
+                    imb = (depth[other] - depth[s]) / (depth[other] + depth[s]) if depth[other] + depth[s] > 0 else 0.0
+                    q_join = 0.0 if spread > TICK else depth[s] / QTY
+                    e = ctx.edge_model.edge(s, imb, ctx.micro_unsigned(), (close_ns - rx) / 6e10, q_join)
+                    if e is not None and e < -p.join_theta:
+                        self.vetoes["join"] += 1
+                        continue
                 # place: becomes live after latency; replaces a cancelled order once it lands
                 if o is None or rx >= o.cancel_at:
                     orders[s] = Order(s, want[s], self.p.size * QTY, None, rx + self.lat, improved=spread > TICK)
@@ -376,9 +407,16 @@ class Quoter:
                 realized += matched / QTY * (r.sell_proceeds / (r.sold / QTY) - r.buy_cost / (r.bought / QTY))
         sd = st.pstdev(pnl) if len(pnl) > 1 else 0.0
         fm = self.fill_markouts[30]
+        ttf = sorted(self.probe_ttf)
+        pct = lambda xs, p: xs[min(len(xs) - 1, int(p * len(xs)))] if xs else float("nan")
         return {
             "name": self.p.name,
             "markets": len(ms),
+            "probe_advance_per_s": self.probe_adv_qty / self.probe_live_s if self.probe_live_s else float("nan"),
+            "probe_ttf_p50": pct(ttf, 0.5), "probe_ttf_p90": pct(ttf, 0.9),
+            "probe_ahead_at_place_p50": pct(sorted(self.probe_ahead_at_place), 0.5),
+            "probe_ahead_at_fill_p50": pct(sorted(self.probe_ahead_at_fill), 0.5),
+            "probe_fill_rate": len(ttf) / max(1, len(self.probe_ahead_at_place)),
             "pnl_$": sum(pnl),
             "test_pnl_$": sum(r.mark_pnl for r in test),
             "test_spread_$": sum(r.spread_capture for r in test),
@@ -548,7 +586,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
     books: dict[str, FastBook] = {}
     closes: dict[str, int] = {}
     ticks: deque = deque()   # (rx_ns, mid)
-    need_ctx = any(p.alpha_thr is not None or p.greeks_cap is not None or p.edge_theta is not None for p in configs)
+    need_ctx = any(p.alpha_thr is not None or p.greeks_cap is not None or p.edge_theta is not None or p.join_theta is not None for p in configs)
     alpha_model = fit_alpha(alpha_parquet) if (alpha_parquet and any(p.alpha_thr is not None for p in configs)) else None
     test_from = alpha_model[3] if alpha_model else 0
     strikes: dict[str, float] = {}
@@ -557,7 +595,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
                           if r.raw.get("type") == "orderbook_snapshot" and r.raw["msg"]["market_ticker"].startswith(series + "-")})
         strikes = fetch_strikes(tickers)
     spot = SpotState()
-    edge_model = EdgeModel(alpha_parquet) if (alpha_parquet and any(p.edge_theta is not None for p in configs)) else None
+    edge_model = EdgeModel(alpha_parquet) if (alpha_parquet and any(p.edge_theta is not None or p.join_theta is not None for p in configs)) else None
     if edge_model is not None and not test_from:
         test_from = edge_model.cutoff_rx
     ctx = Context(spot, strikes, alpha_model, edge_model)
@@ -651,6 +689,21 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
 
 
 _F = dict(latency_ms=2, signal_move=2.0, stop_before_s=300, max_pos=200)
+_G = dict(latency_ms=2, signal_move=2.0, max_pos=200)
+JOIN = [
+    Params("base, stop 5min", **_G, stop_before_s=300),
+    Params("join gate: edge(depth) >= 0, stop 5min", **_G, stop_before_s=300, join_theta=0.0),
+    Params("join gate: edge(depth) >= -0.25c, stop 5min", **_G, stop_before_s=300, join_theta=0.25),
+    Params("join gate 0 + hold policy (edge<0, 300ms), stop 5min", **_G, stop_before_s=300, join_theta=0.0, edge_theta=0.0, edge_debounce_ms=300),
+    Params("join gate 0 + greeks cap 5c, stop 2min", **_G, stop_before_s=120, join_theta=0.0, greeks_cap=0.05),
+    Params("base, stop 2min", **_G, stop_before_s=120),
+]
+
+PROBE = [
+    Params("probe prorata (2ms, cancel $2/1s, stop 5min, max pos 200)", **_F),
+    Params("probe pessimistic", **_F, queue="pessimistic"),
+]
+
 VALUE_OOS = [
     Params("base (2ms, cancel $2/1s, stop 5min, max pos 200)", **_F),
     Params("value policy: cancel if edge < 0, debounce 300ms", **_F, edge_theta=0.0, edge_debounce_ms=300),
@@ -725,14 +778,21 @@ def main() -> None:
     ap.add_argument("--filters2", action="store_true", help="milder and queue-aware filter variants")
     ap.add_argument("--value", action="store_true", help="value-function hold/cancel policy study")
     ap.add_argument("--value-oos", action="store_true", help="value policy, out-of-sample split reported")
+    ap.add_argument("--probe", action="store_true", help="measure queue advancement and time-to-fill of our orders")
+    ap.add_argument("--join", action="store_true", help="join-gating study")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.day}.parquet")
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
     L = [f"# Quoter simulation, {a.series}, {a.day}", "",
          "Touch quoter, 100 contracts/side unless noted, max position 500, quoting stops 2 min before expiry, inventory marked at mid. "
          "No market impact. See `python/kalshi_data/research/sim.py`.", "",
          "| config | " + " | ".join(cols) + " |", "|" + "---|" * (len(cols) + 1)]
+    if a.probe:
+        for r in res:
+            print(f"{r['name']}: advance {r['probe_advance_per_s']:.0f} contracts/s | ahead at placement p50 {r['probe_ahead_at_place_p50']:.0f} | "
+                  f"orders filled {r['probe_fill_rate']*100:.0f}% | time to first fill p50 {r['probe_ttf_p50']:.2f}s p90 {r['probe_ttf_p90']:.1f}s | "
+                  f"ahead at fill p50 {r['probe_ahead_at_fill_p50']:.0f}")
     for r in res:
         if r.get("markets", 0) == 0:
             L.append(f"| {r['name']} | 0 |")

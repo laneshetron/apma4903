@@ -163,3 +163,28 @@ More efficient than flags (11-24% of P&L for 16-56% less adverse
 selection, vs 20-30% for the vetoes) but no OOS gain in total P&L on this
 day. Next: hazard conditional on the adverse state and a continuation term
 for queue advancement (the real DP), and a second day of data.
+
+## DP hold/cancel with measured parameters (hazard.py, --probe, --join)
+
+Measured: sweeps hitting a side arrive at ~8/s (12/s while that side is thin
+with spot leaning against it; 2.3x for sweeps > 500 contracts); adverse
+book/microprice episodes last 0.05-0.13 s; resting orders advance at
+~1,245 contracts/s (pro-rata) / 512/s (pessimistic), median time to first
+fill 0.6 s, 22-35% of placed orders fill before being requoted.
+
+Consequences: a queue position is worth ~1 s of advancement, a transient
+adverse episode costs ~0.1 s of elevated hazard — cancelling is a ~10:1
+losing trade, which is why every cancel-based rule lost. The decision with
+no position at stake — whether to JOIN — is where the signals pay:
+
+| config (2ms, max pos 200, stop 5 min) | day P&L | adverse | OOS P&L | OOS adverse | sd/mkt |
+|---|---|---|---|---|---|
+| base | $2,994 | −$4,761 | $1,402 | −$1,691 | 35 |
+| join gate: edge(depth, state) >= 0 | $3,008 | −$4,031 | $1,342 | −$1,460 | 33 |
+| join gate + hold policy (300 ms) | $2,984 | −$3,404 | $1,238 | −$1,317 | 36 |
+
+Policy structure: (1) gate joins on expected edge; (2) hold through
+transient states; (3) leave/avoid persistent adverse regimes (time to
+expiry, moneyness: Greeks cap, endgame stop); (4) inventory limit/skew.
+A full state-space DP adds little while queues advance this fast; revisit
+for slow markets or sizes where our orders dominate the queue.
