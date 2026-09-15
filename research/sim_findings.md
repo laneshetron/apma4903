@@ -188,3 +188,18 @@ transient states; (3) leave/avoid persistent adverse regimes (time to
 expiry, moneyness: Greeks cap, endgame stop); (4) inventory limit/skew.
 A full state-space DP adds little while queues advance this fast; revisit
 for slow markets or sizes where our orders dominate the queue.
+
+## Fair value model (fair.py, sim --fair)
+
+Settlement-aware model (60s BRTI average vs strike, realized vol). Validation
+(`fair_2026-09-14.md`): calibration vs settlement equals the Kalshi mid's;
+corr with mid 0.99; typical |fair − mid| 3.6c; mid = 0.935 fair + 0.04 (the
+market prices more vol than 5-min realized); the gap predicts mid
+convergence weakly (beta 0.04 at 10s, 0.12 at 60s; >3c gap -> ~1c move in
+30s).
+
+As a quoting gate it sits on the same quality/quantity frontier as the other
+filters and below the edge join gate (P&L −11% to −30%, c/contract 0.19–0.24,
+vetoes lopsided toward the bid by the +1.15c bias). Roles that remain:
+Greeks for regime and inventory skew, position valuation and the endgame
+mechanics, and a small drift term in the reservation price.

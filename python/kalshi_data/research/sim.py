@@ -33,6 +33,7 @@ from ..book import parse_price, parse_qty
 from ..raw import iter_records
 from ..spot import SpotQuote, SpotTrade, iter_spot
 from .alpha import VENUES, SpotState, fetch_strikes
+from .fair import SpotSeries, fair_value
 from .markouts import FastBook, close_time
 
 ONE = 10_000
@@ -63,6 +64,10 @@ class Params:
     edge_theta: float | None = None
     edge_debounce_ms: float = 0.0
     join_theta: float | None = None   # only JOIN/PLACE when expected edge at the placement queue position >= -join_theta
+    # fair value gap rules (cents): gap = fair - mid. Bid is overpriced when gap < -thr, ask when gap > +thr.
+    fair_gap_thr: float | None = None       # presence rule: cancel/avoid the overpriced side
+    fair_gap_join: float | None = None      # join-only rule: don't place on the overpriced side, hold existing orders
+    vol_mult: float = 1.0                   # scale realized vol in the fair value model
 
 
 @dataclass(slots=True)
@@ -342,6 +347,16 @@ class Quoter:
             if p.cluster_ms is not None and allow[s] and rx < self.swept_until[tk][s]:
                 allow[s] = False
                 self.vetoes["cluster"] += 1
+        gap = None
+        if (p.fair_gap_thr is not None or p.fair_gap_join is not None) and ctx is not None:
+            gap = ctx.fair_gap_c(tk, book, rx, close_ns, p.vol_mult)
+        if p.fair_gap_thr is not None and gap is not None:
+            if gap < -p.fair_gap_thr and allow["yes"]:
+                allow["yes"] = False
+                self.vetoes["fair_bid"] += 1
+            if gap > p.fair_gap_thr and allow["no"]:
+                allow["no"] = False
+                self.vetoes["fair_ask"] += 1
         if p.edge_theta is not None and ctx is not None and ctx.edge_model is not None:
             micro = ctx.micro_unsigned()
             ttx_min = (close_ns - rx) / 6e10
@@ -378,6 +393,10 @@ class Quoter:
             if ok and (o is None or o.cancel_at is not None) and not any(
                 x.side == s and x.cancel_at is None for x in orders.values()
             ):
+                if p.fair_gap_join is not None and gap is not None and (
+                        (s == "yes" and gap < -p.fair_gap_join) or (s == "no" and gap > p.fair_gap_join)):
+                    self.vetoes["fair_join"] += 1
+                    continue
                 if p.join_theta is not None and ctx is not None and ctx.edge_model is not None:
                     other = "no" if s == "yes" else "yes"
                     imb = (depth[other] - depth[s]) / (depth[other] + depth[s]) if depth[other] + depth[s] > 0 else 0.0
@@ -549,6 +568,22 @@ class Context:
         self.edge_model = edge_model
         self.alpha: float | None = None
 
+    brti_series: SpotSeries | None = None
+
+    def fair_gap_c(self, tk: str, book: FastBook, rx: int, close_ns: int, vol_mult: float) -> float | None:
+        """fair - mid in cents, from the BRTI-based settlement-aware model."""
+        K = self.strikes.get(tk)
+        if not K or self.brti_series is None:
+            return None
+        vol = self.brti_series.vol()
+        if vol is None:
+            return None
+        f = fair_value(self.brti_series, K, rx / 1e9, close_ns / 1e9, sigma=vol * vol_mult)
+        mid = book.mid()
+        if f is None or mid is None:
+            return None
+        return f * 100 - mid
+
     def micro_unsigned(self) -> float | None:
         sp = self.spot
         if sp.cb_bs is None or sp.cb_as is None or sp.cb_bs + sp.cb_as <= 0 or sp.cb_bid is None:
@@ -586,11 +621,12 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
     books: dict[str, FastBook] = {}
     closes: dict[str, int] = {}
     ticks: deque = deque()   # (rx_ns, mid)
-    need_ctx = any(p.alpha_thr is not None or p.greeks_cap is not None or p.edge_theta is not None or p.join_theta is not None for p in configs)
+    need_fair = any(p.fair_gap_thr is not None or p.fair_gap_join is not None for p in configs)
+    need_ctx = need_fair or any(p.alpha_thr is not None or p.greeks_cap is not None or p.edge_theta is not None or p.join_theta is not None for p in configs)
     alpha_model = fit_alpha(alpha_parquet) if (alpha_parquet and any(p.alpha_thr is not None for p in configs)) else None
     test_from = alpha_model[3] if alpha_model else 0
     strikes: dict[str, float] = {}
-    if any(p.greeks_cap is not None for p in configs):
+    if need_fair or any(p.greeks_cap is not None for p in configs):
         tickers = sorted({r.raw["msg"]["market_ticker"] for r in iter_records(data_dir, day)
                           if r.raw.get("type") == "orderbook_snapshot" and r.raw["msg"]["market_ticker"].startswith(series + "-")})
         strikes = fetch_strikes(tickers)
@@ -599,6 +635,8 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
     if edge_model is not None and not test_from:
         test_from = edge_model.cutoff_rx
     ctx = Context(spot, strikes, alpha_model, edge_model)
+    if need_fair:
+        ctx.brti_series = SpotSeries()
     asset = "ETH" if "ETH" in series else "BTC"
 
     def spot_events():
@@ -645,7 +683,10 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
             continue
         raw = rec.raw
         if raw.get("type") == "cfbenchmarks_value_5hz" and raw["msg"].get("index_id") == "BRTI":
-            spot.on_brti(rx, float(json.loads(raw["msg"]["data"])["value"]))
+            v = float(json.loads(raw["msg"]["data"])["value"])
+            spot.on_brti(rx, v)
+            if ctx.brti_series is not None:
+                ctx.brti_series.add(rx / 1e9, v)
             continue
         t = raw.get("type")
         if t == "_local":
@@ -697,6 +738,16 @@ JOIN = [
     Params("join gate 0 + hold policy (edge<0, 300ms), stop 5min", **_G, stop_before_s=300, join_theta=0.0, edge_theta=0.0, edge_debounce_ms=300),
     Params("join gate 0 + greeks cap 5c, stop 2min", **_G, stop_before_s=120, join_theta=0.0, greeks_cap=0.05),
     Params("base, stop 2min", **_G, stop_before_s=120),
+]
+
+FAIR = [
+    Params("base (2ms, cancel $2/1s, stop 5min, max pos 200)", **_G, stop_before_s=300),
+    Params("fair gap presence rule, thr 3c", **_G, stop_before_s=300, fair_gap_thr=3.0),
+    Params("fair gap presence rule, thr 5c", **_G, stop_before_s=300, fair_gap_thr=5.0),
+    Params("fair gap join-only rule, thr 2c", **_G, stop_before_s=300, fair_gap_join=2.0),
+    Params("fair gap join-only rule, thr 3c", **_G, stop_before_s=300, fair_gap_join=3.0),
+    Params("fair gap join-only 3c + edge join gate 0", **_G, stop_before_s=300, fair_gap_join=3.0, join_theta=0.0),
+    Params("fair gap join-only 3c, vol x1.25", **_G, stop_before_s=300, fair_gap_join=3.0, vol_mult=1.25),
 ]
 
 PROBE = [
@@ -780,8 +831,9 @@ def main() -> None:
     ap.add_argument("--value-oos", action="store_true", help="value policy, out-of-sample split reported")
     ap.add_argument("--probe", action="store_true", help="measure queue advancement and time-to-fill of our orders")
     ap.add_argument("--join", action="store_true", help="join-gating study")
+    ap.add_argument("--fair", action="store_true", help="fair-value gap rules study")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.day}.parquet")
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
     L = [f"# Quoter simulation, {a.series}, {a.day}", "",
