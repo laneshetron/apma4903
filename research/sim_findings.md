@@ -254,3 +254,22 @@ Out-of-sample walk-forward on the first clean collection day (`sim_2026-09-15_wa
 - Join gate and greeks cap transfer out of sample: neutral-to-slightly-positive on P&L, 10-35% less adverse, higher ¢/ct and t-stat. Rules fitted on day 1 did not overfit.
 - α stability: Kalshi book-state features (touch imbalance, prior full sweep, touch depth) reproduce within 0.1¢ across days. The spot ridge α does not: OOS corr 0.17 -> 0.10 and ret_30s, kr_minus_cb, kraken/bitstamp 5s flow all flipped sign. Only cb_imb, coinbase_flow_1s and gemini_btc_flow_5s are stable; trim the α model to those.
 - Day-2 bucket where α > +$2: spot moved +$4.77 in the taker's direction but maker markouts were ~flat (-0.07¢ at 1s vs -0.21¢ on day 1) — the spot->Kalshi pass-through varied between days, another reason not to use α as a veto.
+
+## Vol vs P&L per market, and KXBTCD (2026-09-14 to 09-15)
+
+Per-market base-config P&L joined with each market's median realized BRTI vol (`permkt_<day>.parquet`, `fair_<day>.parquet`; 120 markets):
+
+| BRTI vol quartile | median vol (bp/sqrt-s) | P&L/mkt | spread $ | adverse $ | contracts | c/ct |
+|---|---|---|---|---|---|---|
+| low | 0.34 | 33 | 144 | -111 | 32k | 0.10 |
+| mid-low | 0.46 | 34 | 125 | -91 | 30k | 0.11 |
+| mid-high | 0.58 | 33 | 113 | -80 | 28k | 0.12 |
+| high | 0.99 | 39 | 90 | -53 | 23k | 0.17 |
+
+- Within a day vol does not hurt: P&L/market is flat-to-up and c/ct rises with vol because cancel-on-signal keeps us off the touch during moves (30% fewer contracts, proportionally less adverse).
+- The day-2 degradation is therefore not vol. Day 2 markets were less volatile (median 0.47 vs 0.58) yet adverse selection per market rose (-$69 -> -$99) at similar spread capture in every UTC session. It is flow composition (more informed volume per unit of spread), the nonstationarity the daily ledger must track.
+- Widening on a 1c-tick market = queueing behind the touch: only multi-level (most informed) sweeps reach a one-tick-back quote; the partial-sweep uninformed flow (54-61% of volume, +0.2-0.3c) never does. Queue-position table already says edge turns negative past ~1000 ahead.
+
+KXBTCD (hourly strikes, `markouts_KXBTCD.md`): 52.8M contracts over the two days, 7,354 markets. Fill-conditioned (full+multi) markout -1.08c at 1s / -0.89c at 30s vs +0.48c half-spread — worse than KXBTC15M (-0.56 / -0.99 vs +0.32). Partial sweeps are ~0 (vs +0.2-0.3c on 15M), full sweeps are 13% of volume (vs 6%), and 22% of volume is post-signal (vs 11%). Lower gamma does not buy a calmer regime; the flow is simply sharper. Not a candidate.
+
+Spot recorder now also records perps: coinbase_perp (INTX via Advanced Trade WS), kraken_futures, okx, bybit, hyperliquid (from 2026-09-15 17:23 UTC).
