@@ -1,6 +1,7 @@
-// Package spot records public spot-market feeds (trades and top of book)
-// from BTC/ETH-USD venues, so Kalshi events can be paired with the upstream
-// prices that CF Benchmarks' BRTI/ETHUSD_RTI aggregate.
+// Package spot records public market-data feeds (trades and top of book)
+// from BTC/ETH-USD spot venues, so Kalshi events can be paired with the
+// upstream prices that CF Benchmarks' BRTI/ETHUSD_RTI aggregate, and from
+// perpetual-swap venues, which tend to lead spot in price discovery.
 //
 // Frames are recorded verbatim with the same {"rx_ns", "raw"} envelope as
 // the Kalshi collector, under <data_dir>/spot/<exchange>/raw/YYYY-MM-DD/HH.jsonl.gz.
@@ -26,7 +27,7 @@ type Venue struct {
 	Name           string
 	URL            string
 	Subscribe      []any // messages sent after connect, in order
-	Heartbeat      any   // optional app-level message sent every HeartbeatEvery
+	Heartbeat      any   // optional app-level message sent every HeartbeatEvery (a string is sent verbatim)
 	HeartbeatEvery time.Duration
 }
 
@@ -94,6 +95,63 @@ func venue(name string, assets []string) (Venue, bool) {
 			streams += lower(a) + "usdt@trade/" + lower(a) + "usdt@bookTicker"
 		}
 		return Venue{Name: name, URL: "wss://stream.binance.com:9443/stream?streams=" + streams}, true
+	case "coinbase_perp":
+		// Advanced Trade feed relays the International Exchange perps
+		// (BTC-PERP-INTX) without auth; the INTX feed itself rejects US IPs.
+		ids := sym(func(a string) string { return a + "-PERP-INTX" })
+		return Venue{
+			Name: name, URL: "wss://advanced-trade-ws.coinbase.com",
+			Subscribe: []any{
+				map[string]any{"type": "subscribe", "product_ids": ids, "channel": "ticker"},
+				map[string]any{"type": "subscribe", "product_ids": ids, "channel": "market_trades"},
+				map[string]any{"type": "subscribe", "product_ids": []string{}, "channel": "heartbeats"},
+			},
+		}, true
+	case "kraken_futures":
+		ids := sym(func(a string) string {
+			if a == "BTC" {
+				a = "XBT"
+			}
+			return "PF_" + a + "USD"
+		})
+		return Venue{
+			Name: name, URL: "wss://futures.kraken.com/ws/v1",
+			Subscribe: []any{
+				map[string]any{"event": "subscribe", "feed": "trade", "product_ids": ids},
+				map[string]any{"event": "subscribe", "feed": "ticker", "product_ids": ids},
+			},
+		}, true
+	case "okx":
+		var args []any
+		for _, a := range assets {
+			args = append(args, map[string]any{"channel": "trades", "instId": a + "-USDT-SWAP"},
+				map[string]any{"channel": "bbo-tbt", "instId": a + "-USDT-SWAP"})
+		}
+		return Venue{
+			Name: name, URL: "wss://ws.okx.com:8443/ws/v5/public",
+			Subscribe: []any{map[string]any{"op": "subscribe", "args": args}},
+			Heartbeat: "ping", HeartbeatEvery: 25 * time.Second,
+		}, true
+	case "bybit":
+		var args []string
+		for _, a := range assets {
+			args = append(args, "publicTrade."+a+"USDT", "orderbook.1."+a+"USDT")
+		}
+		return Venue{
+			Name: name, URL: "wss://stream.bybit.com/v5/public/linear",
+			Subscribe: []any{map[string]any{"op": "subscribe", "args": args}},
+			Heartbeat: map[string]any{"op": "ping"}, HeartbeatEvery: 20 * time.Second,
+		}, true
+	case "hyperliquid":
+		var subs []any
+		for _, a := range assets {
+			subs = append(subs, map[string]any{"method": "subscribe", "subscription": map[string]any{"type": "trades", "coin": a}},
+				map[string]any{"method": "subscribe", "subscription": map[string]any{"type": "bbo", "coin": a}})
+		}
+		return Venue{
+			Name: name, URL: "wss://api.hyperliquid.xyz/ws", Subscribe: subs,
+			Heartbeat: map[string]any{"method": "ping"}, HeartbeatEvery: 50 * time.Second,
+		}, true
 	}
 	if len(name) > 7 && name[:7] == "gemini:" {
 		a := name[7:]
@@ -195,7 +253,13 @@ func runOnce(ctx context.Context, v Venue, rec *recorder.Recorder, log *slog.Log
 				}
 				c()
 			case <-hb:
-				b, _ := json.Marshal(v.Heartbeat)
+				b, ok := []byte(nil), false
+				if s, isStr := v.Heartbeat.(string); isStr {
+					b, ok = []byte(s), true
+				}
+				if !ok {
+					b, _ = json.Marshal(v.Heartbeat)
+				}
 				_ = ws.Write(kctx, websocket.MessageText, b)
 			}
 		}

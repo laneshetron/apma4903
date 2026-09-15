@@ -1,9 +1,11 @@
 """Normalize recorded spot-exchange frames (data/spot/<venue>/raw/...) into
 trades and top-of-book quotes.
 
-Venues: coinbase, kraken, bitstamp, gemini_btc / gemini_eth. Times are unix
-ms from the exchange; rx_ns is our receive time. Trade side is the TAKER's
-side ("buy" = taker bought the asset).
+Spot venues: coinbase, kraken, bitstamp, gemini_btc / gemini_eth. Perp
+venues: coinbase_perp (INTX via Advanced Trade), kraken_futures, okx, bybit,
+hyperliquid. Times are unix ms from the exchange; rx_ns is our receive time.
+Trade side is the TAKER's side ("buy" = taker bought the asset); sizes are in
+units of the asset.
 """
 
 from __future__ import annotations
@@ -42,7 +44,12 @@ def _iso_ms(s: str) -> int:
 
 
 def _asset(sym: str) -> str:
-    return sym.split("-")[0].split("/")[0].upper()
+    a = sym.split("-")[0].split("/")[0].upper()
+    return {"PF_XBTUSD": "BTC", "PF_ETHUSD": "ETH", "BTCUSDT": "BTC", "ETHUSDT": "ETH", "XBT": "BTC"}.get(a, a)
+
+
+# OKX USDT swaps are quoted in contracts of a fixed asset amount
+_OKX_CONTRACT = {"BTC": 0.01, "ETH": 0.1}
 
 
 def normalize(venue: str, rec: Record) -> Iterator[SpotTrade | SpotQuote]:
@@ -71,6 +78,58 @@ def normalize(venue: str, rec: Record) -> Iterator[SpotTrade | SpotQuote]:
             asset = raw["channel"].removeprefix("live_trades_").removesuffix("usd").upper()
             yield SpotTrade(rec.rx_ns, venue, asset, float(d["price"]), float(d["amount"]),
                             "buy" if d["type"] == 0 else "sell", int(d["microtimestamp"]) // 1000)
+    elif venue == "coinbase_perp":
+        ch = raw.get("channel")
+        if ch == "market_trades":
+            for e in raw.get("events", []):
+                if e.get("type") != "update":
+                    continue
+                for t in e.get("trades", []):
+                    # side is the MAKER side, as on the Exchange feed (checked against the quote)
+                    yield SpotTrade(rec.rx_ns, venue, _asset(t["product_id"]), float(t["price"]), float(t["size"]),
+                                    "sell" if t["side"] == "BUY" else "buy", _iso_ms(t["time"]))
+        elif ch == "ticker":
+            ts = _iso_ms(raw["timestamp"])
+            for e in raw.get("events", []):
+                for t in e.get("tickers", []):
+                    if t.get("best_bid") and t.get("best_ask"):
+                        yield SpotQuote(rec.rx_ns, venue, _asset(t["product_id"]), float(t["best_bid"]), float(t["best_ask"]), ts)
+    elif venue == "kraken_futures":
+        feed = raw.get("feed")
+        if feed == "trade" and raw.get("type") == "fill":
+            yield SpotTrade(rec.rx_ns, venue, _asset(raw["product_id"]), float(raw["price"]), float(raw["qty"]), raw["side"], int(raw["time"]))
+        elif feed == "ticker" and raw.get("bid") is not None:
+            yield SpotQuote(rec.rx_ns, venue, _asset(raw["product_id"]), float(raw["bid"]), float(raw["ask"]), int(raw["time"]))
+    elif venue == "okx":
+        ch = (raw.get("arg") or {}).get("channel")
+        if ch == "trades" and "data" in raw:
+            for d in raw["data"]:
+                asset = _asset(d["instId"])
+                yield SpotTrade(rec.rx_ns, venue, asset, float(d["px"]), float(d["sz"]) * _OKX_CONTRACT.get(asset, 1.0), d["side"], int(d["ts"]))
+        elif ch == "bbo-tbt" and "data" in raw:
+            asset = _asset(raw["arg"]["instId"])
+            for d in raw["data"]:
+                if d.get("bids") and d.get("asks"):
+                    yield SpotQuote(rec.rx_ns, venue, asset, float(d["bids"][0][0]), float(d["asks"][0][0]), int(d["ts"]))
+    elif venue == "bybit":
+        topic = raw.get("topic", "")
+        if topic.startswith("publicTrade."):
+            for d in raw.get("data", []):
+                yield SpotTrade(rec.rx_ns, venue, _asset(d["s"]), float(d["p"]), float(d["v"]), d["S"].lower(), int(d["T"]))
+        elif topic.startswith("orderbook.1."):
+            d = raw.get("data", {})
+            if d.get("b") and d.get("a"):
+                yield SpotQuote(rec.rx_ns, venue, _asset(d["s"]), float(d["b"][0][0]), float(d["a"][0][0]), int(raw["ts"]))
+    elif venue == "hyperliquid":
+        ch = raw.get("channel")
+        if ch == "trades":
+            for d in raw.get("data", []):
+                yield SpotTrade(rec.rx_ns, venue, d["coin"], float(d["px"]), float(d["sz"]), "buy" if d["side"] == "B" else "sell", int(d["time"]))
+        elif ch == "bbo":
+            d = raw.get("data", {})
+            b, a = d.get("bbo", [None, None])
+            if b and a:
+                yield SpotQuote(rec.rx_ns, venue, d["coin"], float(b["px"]), float(a["px"]), int(d["time"]))
     elif venue.startswith("gemini"):
         if raw.get("type") == "update":
             asset = venue.split("_", 1)[1].upper() if "_" in venue else "BTC"

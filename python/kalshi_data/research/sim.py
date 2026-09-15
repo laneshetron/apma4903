@@ -498,6 +498,7 @@ class Quoter:
             "best_$": max(pnl),
             "contracts": traded,
             "pnl_c_per_contract": sum(pnl) / traded * 100 if traded else float("nan"),
+            "per_market": ms,
             "fill_share_%": traded / vol * 100 if vol else float("nan"),
             "fills": sum(r.fills for r in ms),
             "avg_max_pos": st.mean(r.max_abs_pos for r in ms) / QTY,
@@ -837,6 +838,11 @@ WALK = [
     Params("home 40ms, no rules, stop 2min", latency_ms=40, stop_before_s=120, max_pos=200),
 ]
 
+PERMKT = [
+    Params("base (2ms, cancel $2/1s, stop 5min, max pos 200)", **_G, stop_before_s=300),
+    Params("base, max pos 100", latency_ms=2, signal_move=2.0, stop_before_s=300, max_pos=100),
+]
+
 PROBE = [
     Params("probe prorata (2ms, cancel $2/1s, stop 5min, max pos 200)", **_F),
     Params("probe pessimistic", **_F, queue="pessimistic"),
@@ -923,8 +929,9 @@ def main() -> None:
     ap.add_argument("--dfair2", action="store_true", help="delta-scaled repricing, 1s window and fat-tailed kernel")
     ap.add_argument("--tables-from", type=date.fromisoformat, default=None, help="fit alpha/edge tables on this day's sweep dataset instead of the run day (walk-forward)")
     ap.add_argument("--walk", action="store_true", help="walk-forward config set")
+    ap.add_argument("--per-market", type=Path, default=None, help="run PERMKT configs and write per-market P&L rows to this parquet")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
@@ -952,6 +959,12 @@ def main() -> None:
     print(text)
     if a.out:
         a.out.write_text(text)
+    if a.per_market:
+        rows = [{"config": r["name"], "ticker": m.ticker, "stop_rx": m.stop_rx, "pnl": m.mark_pnl, "spread": m.spread_capture,
+                 "inventory": m.inventory_pnl, "fills": m.fills, "traded": (m.bought + m.sold) / QTY, "market_volume": m.market_volume / QTY,
+                 "max_abs_pos": m.max_abs_pos / QTY}
+                for r in res for m in r["per_market"] if m.mark_pnl is not None]
+        pl.DataFrame(rows).write_parquet(a.per_market)
 
 
 if __name__ == "__main__":

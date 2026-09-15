@@ -1,6 +1,6 @@
 // Command spot records public spot-exchange feeds alongside the Kalshi collector.
 //
-//	spot -data ./data -venues coinbase,kraken,bitstamp,gemini:BTC,gemini:ETH -assets BTC,ETH
+//	spot -data ./data -venues coinbase,kraken,bitstamp,gemini:BTC,gemini:ETH,coinbase_perp,kraken_futures,okx,bybit,hyperliquid -assets BTC,ETH
 package main
 
 import (
@@ -23,7 +23,7 @@ import (
 
 func main() {
 	dataDir := flag.String("data", "./data", "data directory")
-	venues := flag.String("venues", "coinbase,kraken,bitstamp,gemini:BTC,gemini:ETH", "comma-separated venues (binance is geo-blocked from the US)")
+	venues := flag.String("venues", "coinbase,kraken,bitstamp,gemini:BTC,gemini:ETH,coinbase_perp,kraken_futures,okx,bybit,hyperliquid", "comma-separated venues (binance is geo-blocked from the US)")
 	assets := flag.String("assets", "BTC,ETH", "comma-separated base assets")
 	addr := flag.String("status", "127.0.0.1:8081", "status HTTP address")
 	flag.Parse()
