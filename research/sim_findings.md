@@ -236,3 +236,21 @@ The no-impact assumption for joining at <=100 lots is supported for
 mechanical impact; adaptive impact (competitors learning a persistent
 quoter) remains untested and is the reason for the live run, which can
 start at 50-100 lots.
+
+## Day-2 rerun (2026-09-15, 59 markets through 15:50 UTC, tables fitted on 09-14)
+
+Out-of-sample walk-forward on the first clean collection day (`sim_2026-09-15_walk.md`, `alpha_2026-09-15.md`). Day 2 was 45% busier than day 1 (136M vs 94M contracts swept by 15:50 UTC).
+
+| config | day 1 (in-sample, 50 mkts) $/mkt | ¢/ct | t | day 2 (OOS, 59 mkts) $/mkt | ¢/ct | t |
+|---|---|---|---|---|---|---|
+| base 2ms, cancel $2/1s, stop 5min, max pos 200 | 47.98 | 0.17 | 9.5 | 25.32 | 0.09 | 4.9 |
+| + join gate (edge >= 0) | — | — | — | 25.98 | 0.10 | 5.0 |
+| + join gate + greeks cap 5¢ | — | — | — | 24.09 | 0.12 | 5.5 |
+| base, max pos 100 | 27.65 | 0.17 | 11.2 | 21.43 | 0.13 | 8.5 |
+| home 40ms, no rules, stop 2min | ≈0 | -0.02 | -0.6 | -29.91 | -0.07 | -3.7 |
+
+- Still profitable out of sample at every same-AZ config; t-stats 5-8.5 on 59 markets. Net edge per contract roughly halved for max pos 200 (0.17 -> 0.09¢): spread capture per contract is the same (0.43¢) but adverse selection at 10s rose from ~0.26¢ to 0.37¢/ct. Max pos 100 degraded least (0.17 -> 0.13¢) and has the best t-stat, consistent with the day-1 risk-efficiency finding.
+- Home latency flipped from breakeven to clearly negative (-$30/mkt). The same-AZ requirement is not optional.
+- Join gate and greeks cap transfer out of sample: neutral-to-slightly-positive on P&L, 10-35% less adverse, higher ¢/ct and t-stat. Rules fitted on day 1 did not overfit.
+- α stability: Kalshi book-state features (touch imbalance, prior full sweep, touch depth) reproduce within 0.1¢ across days. The spot ridge α does not: OOS corr 0.17 -> 0.10 and ret_30s, kr_minus_cb, kraken/bitstamp 5s flow all flipped sign. Only cb_imb, coinbase_flow_1s and gemini_btc_flow_5s are stable; trim the α model to those.
+- Day-2 bucket where α > +$2: spot moved +$4.77 in the taker's direction but maker markouts were ~flat (-0.07¢ at 1s vs -0.21¢ on day 1) — the spot->Kalshi pass-through varied between days, another reason not to use α as a veto.
