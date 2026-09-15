@@ -220,3 +220,19 @@ The flat rule works as a market-wide toxicity signal (informed flow active
 now), not as a staleness correction; a corrected kernel does not change
 adverse selection. Keep the tail fix for Greeks, inventory valuation and
 the endgame.
+
+## Market impact event study (impact.py, 2026-09-14/15)
+
+Response of the book to a single order joining the touch, by size: cancels,
+joins, taker volume, sweep probability and mid move are flat across 1-20 to
+>=1000 contracts (e.g. swept within 1s 23-25% for every bucket; Δmid
++0.1-0.3c with no trend; cancels 3.4-3.9k/s vs 3.5k control). Others join
+behind large orders slightly more and taker volume at the level is 10-15%
+higher. Touch churn (~3.5k cancels and ~5k joins per second on a ~3k level)
+makes a 100-lot order noise. Improving orders are more exposed: 1-100 lot
+improvers are swept within 1s ~50% of the time.
+
+The no-impact assumption for joining at <=100 lots is supported for
+mechanical impact; adaptive impact (competitors learning a persistent
+quoter) remains untested and is the reason for the live run, which can
+start at 50-100 lots.
