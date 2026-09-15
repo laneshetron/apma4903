@@ -237,9 +237,9 @@ mechanical impact; adaptive impact (competitors learning a persistent
 quoter) remains untested and is the reason for the live run, which can
 start at 50-100 lots.
 
-## Day-2 rerun (2026-09-15, 59 markets through 15:50 UTC, tables fitted on 09-14)
+## Day-2 rerun (2026-09-15, tables fitted on 09-14)
 
-Out-of-sample walk-forward on the first clean collection day (`sim_2026-09-15_walk.md`, `alpha_2026-09-15.md`). Day 2 was 45% busier than day 1 (136M vs 94M contracts swept by 15:50 UTC).
+Out-of-sample walk-forward on day 2 (`sim_2026-09-15_walk.md`, `alpha_2026-09-15.md`). Table below is the 15:50 UTC cut (59 markets); the full day (78 markets, US afternoon holey from laptop outages) came in at base $25.93/mkt (t 6.1, 0.10c/ct), join gate $25.69, join+greeks $24.97 (t 6.7, 0.13c/ct), max pos 100 $20.13 (t 9.5, 0.14c/ct), home 40ms negative. Same picture.
 
 | config | day 1 (in-sample, 50 mkts) $/mkt | ¢/ct | t | day 2 (OOS, 59 mkts) $/mkt | ¢/ct | t |
 |---|---|---|---|---|---|---|
@@ -273,3 +273,9 @@ Per-market base-config P&L joined with each market's median realized BRTI vol (`
 KXBTCD (hourly strikes, `markouts_KXBTCD.md`): 52.8M contracts over the two days, 7,354 markets. Fill-conditioned (full+multi) markout -1.08c at 1s / -0.89c at 30s vs +0.48c half-spread — worse than KXBTC15M (-0.56 / -0.99 vs +0.32). Partial sweeps are ~0 (vs +0.2-0.3c on 15M), full sweeps are 13% of volume (vs 6%), and 22% of volume is post-signal (vs 11%). Lower gamma does not buy a calmer regime; the flow is simply sharper. Not a candidate.
 
 Spot recorder now also records perps: coinbase_perp (INTX via Advanced Trade WS), kraken_futures, okx, bybit, hyperliquid (from 2026-09-15 17:23 UTC).
+
+## Perp feeds as a repricing signal (2026-09-15 17:25-22:40 UTC, `perp_lead_2026-09-15.md`)
+
+- Lead/lag of 100ms mid returns vs Coinbase spot: OKX and Bybit lead by ~100ms on exchange timestamps (asymmetry +0.15 / +0.12) but their feeds arrive ~90-110ms late, so by receive time there is no lead; Coinbase INTX perp, Kraken futures and Hyperliquid lag spot outright.
+- Sweep-conditioned (208k sweeps, 31M contracts): no perp's prior 300ms/1s move agrees with the taker more often than Coinbase's does. Of full+multi sweeps Coinbase calls quiet (55% of informed volume) only 1-3% had a perp move >= 1bp in the taker's direction, and their markouts are no worse.
+- Conclusion (one holey afternoon; rerun on a clean day): the residual adverse selection is not an upstream BTC price lead. Kalshi book-state features remain the only stable predictors. Perps stay recorded but are not a planned input.
