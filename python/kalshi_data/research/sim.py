@@ -554,7 +554,7 @@ class EdgeModel:
 
     def __init__(self, parquet: Path, train_frac: float = 0.6, order: int = 100):
         df = pl.read_parquet(parquet).filter(pl.col("klass") != "unknown").sort("rx_ns")
-        self.cutoff_rx = int(df["rx_ns"][int(df.height * train_frac)])
+        self.cutoff_rx = int(df["rx_ns"][min(df.height - 1, int(df.height * train_frac))])
         df = df[: int(df.height * train_frac)]
         df = df.filter(pl.col("mo0").is_not_null() & pl.col("mo30").is_not_null())
         # features in the parquet are signed into the taker's direction == adverse-for-the-resting-order direction
@@ -671,7 +671,7 @@ class Context:
 # ------------------------------------------------------------------- driver ---
 
 def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params],
-        alpha_parquet: Path | None = None) -> tuple[list[dict], int]:
+        alpha_parquet: Path | None = None, train_frac: float = 0.6) -> tuple[list[dict], int]:
     quoters = [Quoter(p) for p in configs]
     books: dict[str, FastBook] = {}
     closes: dict[str, int] = {}
@@ -686,7 +686,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
                           if r.raw.get("type") == "orderbook_snapshot" and r.raw["msg"]["market_ticker"].startswith(series + "-")})
         strikes = fetch_strikes(tickers)
     spot = SpotState()
-    edge_model = EdgeModel(alpha_parquet) if (alpha_parquet and any(p.edge_theta is not None or p.join_theta is not None for p in configs)) else None
+    edge_model = EdgeModel(alpha_parquet, train_frac=train_frac) if (alpha_parquet and any(p.edge_theta is not None or p.join_theta is not None for p in configs)) else None
     if edge_model is not None and not test_from:
         test_from = edge_model.cutoff_rx
     ctx = Context(spot, strikes, alpha_model, edge_model)
@@ -829,6 +829,14 @@ DFAIR = [
     Params("delta-scaled 0.5c, BRTI spot", **_H, dfair_cancel_c=0.5, fair_spot="brti"),
 ]
 
+WALK = [
+    Params("base (2ms, cancel $2/1s, stop 5min, max pos 200)", **_G, stop_before_s=300),
+    Params("+ join gate (edge >= 0)", **_G, stop_before_s=300, join_theta=0.0),
+    Params("+ join gate + greeks cap 5c", **_G, stop_before_s=300, join_theta=0.0, greeks_cap=0.05),
+    Params("base, max pos 100", latency_ms=2, signal_move=2.0, stop_before_s=300, max_pos=100),
+    Params("home 40ms, no rules, stop 2min", latency_ms=40, stop_before_s=120, max_pos=200),
+]
+
 PROBE = [
     Params("probe prorata (2ms, cancel $2/1s, stop 5min, max pos 200)", **_F),
     Params("probe pessimistic", **_F, queue="pessimistic"),
@@ -913,9 +921,12 @@ def main() -> None:
     ap.add_argument("--fair", action="store_true", help="fair-value gap rules study")
     ap.add_argument("--dfair", action="store_true", help="delta-scaled repricing study")
     ap.add_argument("--dfair2", action="store_true", help="delta-scaled repricing, 1s window and fat-tailed kernel")
+    ap.add_argument("--tables-from", type=date.fromisoformat, default=None, help="fit alpha/edge tables on this day's sweep dataset instead of the run day (walk-forward)")
+    ap.add_argument("--walk", action="store_true", help="walk-forward config set")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else CONFIGS
-    res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.day}.parquet")
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else CONFIGS
+    res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
+                         train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
     L = [f"# Quoter simulation, {a.series}, {a.day}", "",
          "Touch quoter, 100 contracts/side unless noted, max position 500, quoting stops 2 min before expiry, inventory marked at mid. "
