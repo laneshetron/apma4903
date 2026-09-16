@@ -48,6 +48,9 @@ def _asset(sym: str) -> str:
     return {"PF_XBTUSD": "BTC", "PF_ETHUSD": "ETH", "BTCUSDT": "BTC", "ETHUSDT": "ETH", "XBT": "BTC"}.get(a, a)
 
 
+# Gemini v1 top-of-book "change" events carry one side at a time; keep the last of each per venue
+_GEMINI_TOB: dict[str, dict[str, float]] = {}
+
 # OKX USDT swaps are quoted in contracts of a fixed asset amount
 _OKX_CONTRACT = {"BTC": 0.01, "ETH": 0.1}
 
@@ -134,10 +137,17 @@ def normalize(venue: str, rec: Record) -> Iterator[SpotTrade | SpotQuote]:
         if raw.get("type") == "update":
             asset = venue.split("_", 1)[1].upper() if "_" in venue else "BTC"
             ts = raw.get("timestampms")
+            tob = _GEMINI_TOB.setdefault(venue, {})
+            changed = False
             for e in raw.get("events", []):
                 if e.get("type") == "trade" and ts is not None:
                     yield SpotTrade(rec.rx_ns, venue, asset, float(e["price"]), float(e["amount"]),
                                     "sell" if e["makerSide"] == "bid" else "buy", ts)
+                elif e.get("type") == "change" and e.get("reason") == "top-of-book" and float(e.get("remaining", "0")) > 0:
+                    tob[e["side"]] = float(e["price"])
+                    changed = True
+            if changed and "bid" in tob and "ask" in tob and ts is not None:
+                yield SpotQuote(rec.rx_ns, venue, asset, tob["bid"], tob["ask"], ts)
 
 
 def iter_spot(data_dir: Path, venue: str, start: date, end: date | None = None) -> Iterator[SpotTrade | SpotQuote]:

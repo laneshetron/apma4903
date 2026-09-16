@@ -323,3 +323,5 @@ Standing config (REST explicit + join gate + greeks cap): $28.3/mkt, 0.21c/ct, t
 Conclusion: keep Coinbase as the sole cancel signal; feed staleness is not worth acting on. Rules that decide *before* joining (join gate, greeks cap) transfer; rules that pull resting orders do not.
 
 `cmd/wsprobe`: four connections pinned to az2 WS nodes, same market, 98k deltas: engine->rx 5.6-5.9 ms p50 per connection; taking the earliest copy of each delta gains mean 0.88 ms (p50 0.56, p90 1.9, p99 5.9) over a single connection. Node 18.217.10.53 was first 39% of the time and ~0.3 ms faster at p50. Cheap and worth building into the quoter: pin to the fastest node and de-duplicate 2-3 sessions by content.
+
+Gemini as a cancel-signal venue (`sim_2026-09-16_feeds2.md`; Gemini top-of-book quotes now normalized, 677k updates vs Coinbase's 134k in 4.6 h, exchange ts -> receipt 28/48/81 ms p10/p50/p90 from Ohio): gemini-only $19.1/mkt (0.16c/ct), coinbase|gemini $22.4, coinbase|kraken $27.1, vs Coinbase-only $28.3. Gemini is a stable, moderately lagged feed and the best fallback among what we record, but it neither replaces nor improves on Coinbase as the trigger.

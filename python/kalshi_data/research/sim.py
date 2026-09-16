@@ -899,6 +899,12 @@ FEEDS = [
     Params("+ composite signal + stale 100ms", **_R, signal_venues=("coinbase", "okx", "bybit"), stale_feed_ms=100),
     Params("+ okx-only signal", **_R, signal_venues=("okx",)),
 ]
+FEEDS2 = [
+    Params("REST explicit + join gate + greeks cap (standing)", **_R),
+    Params("gemini-only signal", **_R, signal_venues=("gemini_btc",)),
+    Params("coinbase|gemini signal", **_R, signal_venues=("coinbase", "gemini_btc")),
+    Params("coinbase|kraken signal", **_R, signal_venues=("coinbase", "kraken")),
+]
 
 LATSWEEP = [
     Params(f"place {a} / cancel {b} / signal {c}", **{**_M, "place_latency_ms": a, "cancel_latency_ms": b, "signal_latency_ms": c})
@@ -1001,8 +1007,9 @@ def main() -> None:
     ap.add_argument("--latsweep", action="store_true", help="sweep place/cancel/signal latency combinations")
     ap.add_argument("--awstape", action="store_true", help="measured latencies for the AWS-recorded tape (no clock-skew conversion)")
     ap.add_argument("--feeds", action="store_true", help="stale-feed veto and composite-signal study (AWS tape)")
+    ap.add_argument("--feeds2", action="store_true", help="gemini / kraken as cancel-signal venues")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
