@@ -314,3 +314,12 @@ AWS tape, 17:35-22:10 UTC, 18 markets, tables from 09-15 (`sim_2026-09-16_awstap
 Upstream feed lag from Ohio: Coinbase (ws-feed, via Cloudflare) 11 ms p50 in calm periods but 100-130 ms p50 / 1-1.5 s p90 in busy 10-minute windows (18:00-18:20 UTC); OKX flat 79-84 ms at 20x the message rate; Kalshi deltas flat 7 ms. Coinbase stalls are Coinbase-side. Sweeps bucketed by the delivery lag of our latest Coinbase message: 74% of volume arrives with a fresh (<15 ms) view; the 15-300 ms buckets (19% of volume) show full+multi markouts of -0.35 to -0.68c at 1s vs -0.32c fresh. Real but modest (~0.03c/ct overall); a freshest-source composite signal (OKX/Bybit when Coinbase is stalled) is a cheap incremental improvement, not the main adverse-selection source.
 
 Kalshi WS delivery (engine ts_ms -> receipt) is 6-7 ms and identical on the single-market probe connection and the 320-market collector connection; second joiners at a fresh level arrive ~2 ms after the first, so they are not reacting to the WS delta. The race is won by pre-positioning (resting one tick away before the level forms), not by parsing faster. That is the next sim variant.
+
+## Feed-quality rules and multiple WS connections (AWS tape 2026-09-16, `sim_2026-09-16_feeds.md`)
+
+Standing config (REST explicit + join gate + greeks cap): $28.3/mkt, 0.21c/ct, t 3.7. Every feed rule tested lowers it:
+- pull quotes while the latest Coinbase message was >30 / >100 / >300 ms late: $18.6 / $21.5 / $19.9. Same lesson as the presence vetoes: leaving the touch costs queue position and spread capture more than the stale-feed adverse selection it avoids.
+- composite cancel signal (coinbase|okx|bybit): $14.0; OKX-only: $22.7. The 80 ms-lagged venues add late, redundant cancels that mostly cost queue position.
+Conclusion: keep Coinbase as the sole cancel signal; feed staleness is not worth acting on. Rules that decide *before* joining (join gate, greeks cap) transfer; rules that pull resting orders do not.
+
+`cmd/wsprobe`: four connections pinned to az2 WS nodes, same market, 98k deltas: engine->rx 5.6-5.9 ms p50 per connection; taking the earliest copy of each delta gains mean 0.88 ms (p50 0.56, p90 1.9, p99 5.9) over a single connection. Node 18.217.10.53 was first 39% of the time and ~0.3 ms faster at p50. Cheap and worth building into the quoter: pin to the fastest node and de-duplicate 2-3 sessions by content.

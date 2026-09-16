@@ -52,6 +52,8 @@ class Params:
     place_latency_ms: float | None = None    # book event seen -> our order live at the engine
     cancel_latency_ms: float | None = None   # book event seen -> our cancel effective
     signal_latency_ms: float | None = None   # spot tick seen -> our cancel effective
+    signal_venues: tuple = ("coinbase",)     # venues whose 1s mid move can trigger cancel-on-signal
+    stale_feed_ms: float | None = None       # pull quotes while the latest Coinbase message arrived this late (rx - exchange ts)
     stop_before_s: float = 120.0
     signal_move: float | None = None  # $ over 1s on the spot mid; None disables
     cooldown_ms: float = 1000.0
@@ -132,6 +134,7 @@ class Quoter:
         self.stopped: set[str] = set()
         self.swept_until: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": 0, "no": 0})
         self.vetoes: dict[str, int] = defaultdict(int)  # reason -> count of (side, requote) decisions blocked
+        self.feed_lag_ms = 0.0   # delivery lag of the latest Coinbase message
         self.adverse_since: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": -1, "no": -1})
         self.probe_adv_qty = 0.0     # contracts by which live orders advanced
         self.probe_live_s = 0.0      # live-order seconds
@@ -373,6 +376,9 @@ class Quoter:
             if g is not None and g >= p.greeks_cap:
                 allow = {"yes": False, "no": False}
                 self.vetoes["greeks"] += 2
+        if p.stale_feed_ms is not None and self.feed_lag_ms > p.stale_feed_ms:
+            allow = {"yes": False, "no": False}
+            self.vetoes["stale_feed"] += 2
         if p.alpha_thr is not None and ctx is not None and ctx.alpha is not None:
             if ctx.alpha <= -p.alpha_thr and allow["yes"]:   # spot predicted down: our bid is stale
                 allow["yes"] = False
@@ -703,8 +709,14 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
     ctx.closes = closes
     asset = "ETH" if "ETH" in series else "BTC"
 
+    signal_venues = set()
+    for p in configs:
+        signal_venues |= set(p.signal_venues)
+    extra = [v for v in ("okx", "bybit") if v in signal_venues and (data_dir / "spot" / v).is_dir()]
+    vticks: dict[str, deque] = {v: deque() for v in signal_venues}
+
     def spot_events():
-        its = [iter_spot(data_dir, v, day) for v in VENUES]
+        its = [iter_spot(data_dir, v, day) for v in (*VENUES, *extra)]
         yield from heapq.merge(*its, key=lambda e: e.rx_ns)
 
     def cb_sizes():
@@ -725,27 +737,34 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
             continue
         rx = rec.rx_ns
         if isinstance(rec, SpotTrade):
-            if rec.asset == asset:
+            if rec.asset == asset and rec.venue in VENUES:
                 spot.on_trade(rec)
             continue
         if isinstance(rec, SpotQuote):
             if rec.asset != asset:
                 continue
-            spot.on_quote(rec)
-            if rec.venue != venue:
+            if rec.venue in VENUES:
+                spot.on_quote(rec)
+            if rec.venue == venue and rec.ts_ms is not None:
+                lag = rx / 1e6 - rec.ts_ms
+                for q in quoters:
+                    q.feed_lag_ms = lag
+            if rec.venue not in signal_venues:
                 continue
             mid = (rec.bid + rec.ask) / 2
-            if ctx.cb_series is not None:
+            if rec.venue == venue and ctx.cb_series is not None:
                 ctx.cb_series.add(rx / 1e9, mid)
-            while ticks and ticks[0][0] < rx - 1_000_000_000:
-                ticks.popleft()
-            ago = ticks[0][1] if ticks else None
-            ticks.append((rx, mid))
-            if need_ctx:
+            vt = vticks[rec.venue]
+            while vt and vt[0][0] < rx - 1_000_000_000:
+                vt.popleft()
+            ago = vt[0][1] if vt else None
+            vt.append((rx, mid))
+            if need_ctx and rec.venue == venue:
                 ctx.refresh_alpha(rx)
             live = [tk for tk, b in books.items() if not b.stale]
             for q in quoters:
-                q.on_tick(live, rx, mid, ago, ctx)
+                if rec.venue in q.p.signal_venues:
+                    q.on_tick(live, rx, mid, ago, ctx)
             continue
         raw = rec.raw
         if raw.get("type") == "cfbenchmarks_value_5hz" and raw["msg"].get("index_id") == "BRTI":
@@ -870,6 +889,17 @@ AWSTAPE = [
     Params("place 3 / cancel 3 / signal 9", **_A, place_latency_ms=3, cancel_latency_ms=3, signal_latency_ms=9),
 ]
 
+_R = dict(signal_move=2.0, stop_before_s=300, max_pos=200, place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, join_theta=0.0, greeks_cap=0.05)
+FEEDS = [
+    Params("REST explicit + join gate + greeks cap (standing)", **_R),
+    Params("+ pull quotes when Coinbase feed lag > 100ms", **_R, stale_feed_ms=100),
+    Params("+ pull quotes when Coinbase feed lag > 300ms", **_R, stale_feed_ms=300),
+    Params("+ pull quotes when Coinbase feed lag > 30ms", **_R, stale_feed_ms=30),
+    Params("+ composite signal (coinbase|okx|bybit)", **_R, signal_venues=("coinbase", "okx", "bybit")),
+    Params("+ composite signal + stale 100ms", **_R, signal_venues=("coinbase", "okx", "bybit"), stale_feed_ms=100),
+    Params("+ okx-only signal", **_R, signal_venues=("okx",)),
+]
+
 LATSWEEP = [
     Params(f"place {a} / cancel {b} / signal {c}", **{**_M, "place_latency_ms": a, "cancel_latency_ms": b, "signal_latency_ms": c})
     for a, b, c in ((2, 2, 2), (3, 3, 6), (5, 4, 8), (5, 4, 15), (8, 6, 8), (8, 6, 15), (11, 7, 18), (17, 13, 22))
@@ -970,8 +1000,9 @@ def main() -> None:
     ap.add_argument("--measured", action="store_true", help="measured AWS order-entry latencies")
     ap.add_argument("--latsweep", action="store_true", help="sweep place/cancel/signal latency combinations")
     ap.add_argument("--awstape", action="store_true", help="measured latencies for the AWS-recorded tape (no clock-skew conversion)")
+    ap.add_argument("--feeds", action="store_true", help="stale-feed veto and composite-signal study (AWS tape)")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
