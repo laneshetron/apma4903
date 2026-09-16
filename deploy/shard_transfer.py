@@ -23,7 +23,7 @@ BASE = "https://api.elections.kalshi.com/trade-api/v2"
 key = serialization.load_pem_private_key(open(os.environ["KALSHI_PRIVATE_KEY_PATH"], "rb").read(), None)
 
 
-def call(method: str, path: str, body: dict | None = None):
+def call(method, path, body=None):
     ts = str(int(time.time() * 1000))
     msg = (ts + method + "/trade-api/v2" + path.split("?")[0]).encode()
     sig = base64.b64encode(key.sign(msg, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=hashes.SHA256().digest_size), hashes.SHA256())).decode()
