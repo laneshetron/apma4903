@@ -272,6 +272,7 @@ func run() error {
 	n := flag.Int("n", 50, "iterations")
 	gap := flag.Duration("gap", 1500*time.Millisecond, "pause between iterations")
 	out := flag.String("out", "", "write per-iteration JSON lines here")
+	shard := flag.Int("shard", 2, "ExDestination<100>: explicit exchange shard (-1 = auto-route by Symbol, adds latency)")
 	flag.Parse()
 
 	cfg, err := config.Load(*cfgPath)
@@ -337,7 +338,7 @@ func run() error {
 	}
 	var samples []sample
 	for i := 0; i < *n; i++ {
-		s := probeOnce(fx, ticker, *price, deltaEv)
+		s := probeOnce(fx, ticker, *price, *shard, deltaEv)
 		s.I = i
 		samples = append(samples, s)
 		if w != nil {
@@ -414,11 +415,12 @@ func waitDelta(ch chan kalshi.RawMessage, price string, sign int, timeout time.D
 	}
 }
 
-func probeOnce(fx *fixConn, ticker, price string, deltaEv chan kalshi.RawMessage) sample {
+func probeOnce(fx *fixConn, ticker, price string, shard int, deltaEv chan kalshi.RawMessage) sample {
 	drain(deltaEv)
 	ms := func(t0, t time.Time) float64 { return float64(t.Sub(t0).Nanoseconds()) / 1e6 }
 	s := sample{ClOrdID: uuid.NewString()}
-	t0, err := fx.send("D", []string{"11=" + s.ClOrdID, "38=1", "40=2", "54=1", "55=" + ticker, "44=" + price, "59=1", "18=6"})
+	ex := "100=" + strconv.Itoa(shard)
+	t0, err := fx.send("D", []string{"11=" + s.ClOrdID, "38=1", "40=2", "54=1", "55=" + ticker, "44=" + price, "59=1", "18=6", ex})
 	s.Send = t0.UnixNano()
 	if err != nil {
 		s.Err = "send: " + err.Error()
@@ -440,7 +442,7 @@ func probeOnce(fx *fixConn, ticker, price string, deltaEv chan kalshi.RawMessage
 
 	drain(deltaEv)
 	cid := uuid.NewString()
-	t1, err := fx.send("F", []string{"11=" + cid, "41=" + s.ClOrdID, "37=" + m[37], "54=1", "55=" + ticker})
+	t1, err := fx.send("F", []string{"11=" + cid, "41=" + s.ClOrdID, "37=" + m[37], "54=1", "55=" + ticker, ex})
 	if err != nil {
 		s.Err = "cancel send: " + err.Error()
 		return s

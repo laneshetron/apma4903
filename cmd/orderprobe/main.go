@@ -65,7 +65,8 @@ func run() error {
 	price := flag.String("price", "0.01", "YES bid price, dollars")
 	n := flag.Int("n", 50, "iterations")
 	gap := flag.Duration("gap", 1500*time.Millisecond, "pause between iterations")
-	restBase := flag.String("rest", "", "override REST base URL, e.g. https://trading-api.kalshi.com/trade-api/v2")
+	restBase := flag.String("rest", "", "override REST base URL")
+	shard := flag.Int("shard", -1, "exchange_index to route to explicitly (-1 = Kalshi auto-routing by ticker, which adds latency)")
 	out := flag.String("out", "", "write per-iteration JSON lines here")
 	flag.Parse()
 
@@ -101,7 +102,7 @@ func run() error {
 		fmt.Fprintln(os.Stderr, err.Error()+"; waiting")
 		time.Sleep(15 * time.Second)
 	}
-	fmt.Fprintf(os.Stderr, "market %s, REST %s, price %s\n", ticker, base, *price)
+	fmt.Fprintf(os.Stderr, "market %s, REST %s, price %s, shard %d\n", ticker, base, *price, *shard)
 
 	conn, err := kalshi.Dial(ctx, env, signer, kalshi.DialOptions{})
 	if err != nil {
@@ -143,7 +144,7 @@ func run() error {
 	}
 	var samples []sample
 	for i := 0; i < *n; i++ {
-		s := probeOnce(ctx, cl, ticker, *price, userEv, deltaEv)
+		s := probeOnce(ctx, cl, ticker, *price, *shard, userEv, deltaEv)
 		s.I = i
 		samples = append(samples, s)
 		if w != nil {
@@ -250,7 +251,7 @@ func waitUser(ctx context.Context, ch chan kalshi.RawMessage, orderID, status st
 	}
 }
 
-func probeOnce(ctx context.Context, cl *gen.ClientWithResponses, ticker, price string, userEv, deltaEv chan kalshi.RawMessage) sample {
+func probeOnce(ctx context.Context, cl *gen.ClientWithResponses, ticker, price string, shard int, userEv, deltaEv chan kalshi.RawMessage) sample {
 	drain(userEv)
 	drain(deltaEv)
 	ms := func(t0 time.Time, t time.Time) float64 { return float64(t.Sub(t0).Nanoseconds()) / 1e6 }
@@ -258,6 +259,12 @@ func probeOnce(ctx context.Context, cl *gen.ClientWithResponses, ticker, price s
 	req := gen.CreateOrderV2Request{
 		Ticker: ticker, Side: gen.Bid, Count: "1", Price: price, ClientOrderId: uuid.NewString(),
 		TimeInForce: gen.GoodTillCanceled, PostOnly: &postOnly, SelfTradePreventionType: gen.Maker,
+	}
+	cparams := &gen.CancelOrderV2Params{MarketTicker: ticker}
+	if shard >= 0 {
+		ex := gen.ExchangeIndex(shard)
+		req.ExchangeIndex = &ex
+		cparams = &gen.CancelOrderV2Params{ExchangeIndex: &ex}
 	}
 	s := sample{Ticker: ticker}
 	t0 := time.Now()
@@ -294,7 +301,7 @@ func probeOnce(ctx context.Context, cl *gen.ClientWithResponses, ticker, price s
 	drain(deltaEv)
 	t1 := time.Now()
 	s.CancelSend = t1.UnixNano()
-	cresp, err := cl.CancelOrderV2WithResponse(ctx, s.OrderID, &gen.CancelOrderV2Params{MarketTicker: ticker})
+	cresp, err := cl.CancelOrderV2WithResponse(ctx, s.OrderID, cparams)
 	tCAck := time.Now()
 	if err != nil {
 		s.Err = "cancel: " + err.Error()

@@ -858,6 +858,18 @@ MEASURED = [
     Params("FIX-like (place 8 / cancel 6 / signal 15)", **{**_M, "place_latency_ms": 8, "cancel_latency_ms": 6, "signal_latency_ms": 15}),
 ]
 
+# On the AWS tape no clock-skew conversion is needed: Kalshi engine -> us 6 ms, Coinbase -> us 11 ms.
+# Explicit-shard REST: place 9, cancel 5; spot-triggered cancel lands at engine C+11+5 -> tape C+22 = coinbase_rx + 11.
+_A = dict(signal_move=2.0, stop_before_s=300, max_pos=200)
+AWSTAPE = [
+    Params("2ms all (reference)", **_A, latency_ms=2),
+    Params("REST explicit shard (place 9 / cancel 5 / signal 11)", **_A, place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
+    Params("REST explicit + join gate + greeks cap", **_A, place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, join_theta=0.0, greeks_cap=0.05),
+    Params("REST explicit, max pos 100", **{**_A, "max_pos": 100}, place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
+    Params("FIX-like (place 5 / cancel 3 / signal 9)", **_A, place_latency_ms=5, cancel_latency_ms=3, signal_latency_ms=9),
+    Params("place 3 / cancel 3 / signal 9", **_A, place_latency_ms=3, cancel_latency_ms=3, signal_latency_ms=9),
+]
+
 LATSWEEP = [
     Params(f"place {a} / cancel {b} / signal {c}", **{**_M, "place_latency_ms": a, "cancel_latency_ms": b, "signal_latency_ms": c})
     for a, b, c in ((2, 2, 2), (3, 3, 6), (5, 4, 8), (5, 4, 15), (8, 6, 8), (8, 6, 15), (11, 7, 18), (17, 13, 22))
@@ -957,8 +969,9 @@ def main() -> None:
     ap.add_argument("--per-market", type=Path, default=None, help="run PERMKT configs and write per-market P&L rows to this parquet")
     ap.add_argument("--measured", action="store_true", help="measured AWS order-entry latencies")
     ap.add_argument("--latsweep", action="store_true", help="sweep place/cancel/signal latency combinations")
+    ap.add_argument("--awstape", action="store_true", help="measured latencies for the AWS-recorded tape (no clock-skew conversion)")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else PERMKT if a.per_market else MEASURED if a.measured else LATSWEEP if a.latsweep else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
