@@ -1,0 +1,17 @@
+[Unit]
+Description=Spot and perp market-data recorder
+After=network-online.target chronyd.service
+Wants=network-online.target
+
+[Service]
+User=kalshi
+WorkingDirectory=/opt/kalshi
+ExecStart=/opt/kalshi/bin/spot -data /opt/kalshi/data -status 127.0.0.1:8081
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+StandardOutput=append:/opt/kalshi/logs/spot.log
+StandardError=append:/opt/kalshi/logs/spot.log
+
+[Install]
+WantedBy=multi-user.target

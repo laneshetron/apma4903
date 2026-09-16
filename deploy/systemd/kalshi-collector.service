@@ -1,0 +1,18 @@
+[Unit]
+Description=Kalshi market-data collector
+After=network-online.target chronyd.service
+Wants=network-online.target
+
+[Service]
+User=kalshi
+WorkingDirectory=/opt/kalshi
+ExecStart=/opt/kalshi/bin/collector -config /opt/kalshi/config.yaml
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+Nice=-5
+StandardOutput=append:/opt/kalshi/logs/collector.log
+StandardError=append:/opt/kalshi/logs/collector.log
+
+[Install]
+WantedBy=multi-user.target

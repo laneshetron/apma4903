@@ -26,3 +26,14 @@ Reading the matrix:
   connect to that IP directly (pin it in config, re-resolve periodically).
 4. Deploy the collector, spot recorder and later the quoter in the winning AZ;
    keep the instance's IP list for `--resolve`-style pinning.
+
+## Recorder host (use2-az3, i-06df29ae29b6f2bcf, 3.21.102.44)
+
+Layout on the host: `/opt/kalshi/{bin,data,logs,config.yaml,.env,kalshi-api.pem}`,
+owned by the `kalshi` system user; units in `deploy/systemd/` run as that user
+and restart on failure. Root volume grown to 100 GB (~1 month of raw data).
+
+- Build: `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o build/linux/<name> ./cmd/<name>`
+- Update a binary: scp to `~/stage`, `sudo install -m755 -o kalshi ... /opt/kalshi/bin/`, `sudo systemctl restart kalshi-<name>`
+- Status: `curl 127.0.0.1:8080/status` (collector), `:8081/status` (spot); logs in `/opt/kalshi/logs/`
+- Pull data: `deploy/sync.sh` -> `./data_aws/`; analysis tools take `--data-dir ../data_aws`

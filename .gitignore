@@ -23,3 +23,7 @@ config.yaml
 logs/
 research/_*.md
 research/*.parquet
+
+# data pulled from the AWS recorder (deploy/sync.sh)
+data_aws/
+build/
