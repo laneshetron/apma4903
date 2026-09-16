@@ -292,3 +292,13 @@ Spot recorder now also records perps: coinbase_perp (INTX via Advanced Trade WS)
 - Two consecutive OOS days agree: ~$25/mkt base, join gate adds +$5 on day 3 (best day-3 config), greeks cap trades P&L for ¢/ct. Day-1's $48 was the optimistic draw.
 - Adverse-selection features stable for a third day (other-side-deeper -1.01c, prev full sweep -1.22c at 1s); spot ridge OOS corr 0.17 -> 0.11 -> 0.085, only cb_imb stable.
 - Perp lead/lag on a clean 15.7h window (`perp_lead_2026-09-16.md`): OKX/Bybit lead Coinbase by ~100ms intrinsically (asym +0.48/+0.39) but transport lag (70-90ms) removes it by receive time; the other perps lag. Only 0.5-1.2% of Coinbase-quiet informed sweeps had a perp move first. Closed: perps are not the missing signal.
+
+## AWS deployment measurements (2026-09-16, us-east-2)
+
+AZ probe (`deploy/azprobe.py`, `deploy/az-*.json`): WS load-balancer nodes in all three AZs; nodes in use2-az1 pay ~1.1 ms extra to reach the WS backend, az2/az3 nodes ~1.1-1.25 ms total. With the az3 recorder idle and the az2 recorder loaded, az2 still wins on every metric: intra-AZ TCP RTT 0.16-0.18 vs 0.34-0.37 ms, WS TTFB 1.32 vs 1.36 ms, trading-api 0.26 vs 0.44 ms. Recorder load on a t3.micro inflated the earlier az3 TTFB by ~0.1-0.2 ms, so the first-pass az2 margin was overstated; the ranking stands. Deployed in **use2-az2**.
+
+Feed arrival from az3, 17:35-18:30 UTC, exchange timestamp -> our receipt (p10/p50/p90 ms): Coinbase 9/11/34, Kraken 50/55/78, OKX 81/82/85, Bybit 104/107/113, Kraken futures 50/67/287, Coinbase perp 117/175/220, Hyperliquid 267/316/437. Kalshi: engine ts_ms -> receipt 4.8/6.2/8.1 ms (deltas), Kalshi's BRTI received_at -> receipt 3.8 ms, CF source -> receipt 43 ms.
+
+Laptop clock caveat: identical Kalshi messages show laptop rx *earlier* than AWS rx by 2.8 ms median, i.e. the laptop clock ran ~15 ms fast. Absolute lags measured on the laptop were understated by that much; relative timings (both legs on the laptop clock) are unaffected.
+
+Clock-independent taker speed (Kalshi engine ts_ms minus Coinbase exchange ts, KXBTC15M trades within 1 s of a $2/1s Coinbase move, 1.2M contracts): 4% within 5 ms, 7% within 12 ms, 11% within 30 ms, 28% within 100 ms. From Ohio we see Coinbase at ~11 ms and can cancel by ~12-13 ms engine time, so ~93% of post-signal volume is dodgeable; a us-east-1 taker gains nothing on us because Coinbase->Ohio and Virginia->Ohio are the same hop.
