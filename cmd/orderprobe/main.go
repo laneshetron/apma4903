@@ -91,10 +91,15 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// pick the open market of the series with the most time left (>= 8 min)
-	ticker, err := pickMarket(ctx, cl, *series)
-	if err != nil {
-		return err
+	// pick the open market of the series with the most time left (>= 8 min);
+	// 15-minute series have one market open at a time, so wait for a fresh one
+	var ticker string
+	for {
+		if ticker, err = pickMarket(ctx, cl, *series); err == nil {
+			break
+		}
+		fmt.Fprintln(os.Stderr, err.Error()+"; waiting")
+		time.Sleep(15 * time.Second)
 	}
 	fmt.Fprintf(os.Stderr, "market %s, REST %s, price %s\n", ticker, base, *price)
 
