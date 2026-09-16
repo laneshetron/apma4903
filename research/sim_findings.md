@@ -279,3 +279,16 @@ Spot recorder now also records perps: coinbase_perp (INTX via Advanced Trade WS)
 - Lead/lag of 100ms mid returns vs Coinbase spot: OKX and Bybit lead by ~100ms on exchange timestamps (asymmetry +0.15 / +0.12) but their feeds arrive ~90-110ms late, so by receive time there is no lead; Coinbase INTX perp, Kraken futures and Hyperliquid lag spot outright.
 - Sweep-conditioned (208k sweeps, 31M contracts): no perp's prior 300ms/1s move agrees with the taker more often than Coinbase's does. Of full+multi sweeps Coinbase calls quiet (55% of informed volume) only 1-3% had a perp move >= 1bp in the taker's direction, and their markouts are no worse.
 - Conclusion (one holey afternoon; rerun on a clean day): the residual adverse selection is not an upstream BTC price lead. Kalshi book-state features remain the only stable predictors. Perps stay recorded but are not a planned input.
+
+## Day 3 (2026-09-16 through 15:40 UTC, 60 markets, tables fitted on 09-15)
+
+| config | 09-14 in-sample | 09-15 OOS | 09-16 OOS |
+|---|---|---|---|
+| base 2ms, max pos 200: $/mkt (c/ct, t) | 47.98 (0.17, 9.5) | 25.93 (0.10, 6.1) | 25.56 (0.11, 4.7) |
+| + join gate | — | 25.69 (0.11, 5.9) | 30.35 (0.13, 5.9) |
+| + join gate + greeks cap | — | 24.97 (0.13, 6.7) | 23.41 (0.14, 4.9) |
+| base, max pos 100 | 27.65 (0.17, 11.2) | 20.13 (0.14, 9.5) | 18.01 (0.13, 6.8) |
+
+- Two consecutive OOS days agree: ~$25/mkt base, join gate adds +$5 on day 3 (best day-3 config), greeks cap trades P&L for ¢/ct. Day-1's $48 was the optimistic draw.
+- Adverse-selection features stable for a third day (other-side-deeper -1.01c, prev full sweep -1.22c at 1s); spot ridge OOS corr 0.17 -> 0.11 -> 0.085, only cb_imb stable.
+- Perp lead/lag on a clean 15.7h window (`perp_lead_2026-09-16.md`): OKX/Bybit lead Coinbase by ~100ms intrinsically (asym +0.48/+0.39) but transport lag (70-90ms) removes it by receive time; the other perps lag. Only 0.5-1.2% of Coinbase-quiet informed sweeps had a perp move first. Closed: perps are not the missing signal.
