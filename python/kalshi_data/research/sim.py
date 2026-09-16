@@ -48,6 +48,10 @@ class Params:
     size: int = 100                 # contracts per side
     max_pos: int = 500              # contracts
     latency_ms: float = 2.0
+    # optional split of latency_ms by action, in tape time (see MEASURED for the AWS calibration)
+    place_latency_ms: float | None = None    # book event seen -> our order live at the engine
+    cancel_latency_ms: float | None = None   # book event seen -> our cancel effective
+    signal_latency_ms: float | None = None   # spot tick seen -> our cancel effective
     stop_before_s: float = 120.0
     signal_move: float | None = None  # $ over 1s on the spot mid; None disables
     cooldown_ms: float = 1000.0
@@ -119,7 +123,9 @@ class Quoter:
 
     def __init__(self, p: Params):
         self.p = p
-        self.lat = int(p.latency_ms * 1e6)
+        self.lat = int((p.cancel_latency_ms if p.cancel_latency_ms is not None else p.latency_ms) * 1e6)
+        self.lat_place = int((p.place_latency_ms if p.place_latency_ms is not None else p.latency_ms) * 1e6)
+        self.lat_signal = int((p.signal_latency_ms if p.signal_latency_ms is not None else p.latency_ms) * 1e6)
         self.orders: dict[str, dict[str, Order]] = defaultdict(dict)   # ticker -> side -> Order
         self.pnl: dict[str, MarketPnL] = {}
         self.blocked: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": 0, "no": 0})  # side -> rx_ns until which quoting is off
@@ -327,7 +333,7 @@ class Quoter:
             self.blocked[tk][stale] = until
             o = self.orders[tk].get(stale)
             if o is not None and o.cancel_at is None:
-                o.cancel_at = rx + self.lat
+                o.cancel_at = rx + self.lat_signal
 
     def _requote(self, tk: str, rx: int, book: FastBook, close_ns: int, ctx: "Context | None" = None) -> None:
         orders = self.orders[tk]
@@ -447,7 +453,7 @@ class Quoter:
                         continue
                 # place: becomes live after latency; replaces a cancelled order once it lands
                 if o is None or rx >= o.cancel_at:
-                    orders[s] = Order(s, want[s], self.p.size * QTY, None, rx + self.lat, improved=spread > TICK)
+                    orders[s] = Order(s, want[s], self.p.size * QTY, None, rx + self.lat_place, improved=spread > TICK)
                     if p.dfair_cancel_c is not None and ctx is not None:
                         orders[s].fair_at_place = ctx.fair_c(tk, rx, close_ns, p.fair_spot, p.vol_mult, p.kernel)
 
@@ -838,6 +844,25 @@ WALK = [
     Params("home 40ms, no rules, stop 2min", latency_ms=40, stop_before_s=120, max_pos=200),
 ]
 
+# Measured on the AWS host (2026-09-16): order -> engine 11 ms, cancel -> engine 7 ms, Kalshi engine -> us 6 ms,
+# Coinbase -> us 11 ms. Laptop tape timestamps run ~15 ms fast and lag Kalshi by ~19 ms / Coinbase by ~15 ms (true),
+# so in laptop-tape time: place = 6+11 = 17, cancel = 6+7 = 13, spot-triggered cancel = 11+7+(19-15) = 22.
+_M = dict(signal_move=2.0, stop_before_s=300, max_pos=200, place_latency_ms=17, cancel_latency_ms=13, signal_latency_ms=22)
+MEASURED = [
+    Params("as simulated before (2ms all)", **_G, stop_before_s=300),
+    Params("measured REST path (place 17 / cancel 13 / signal 22)", **_M),
+    Params("measured + join gate", **_M, join_theta=0.0),
+    Params("measured + join gate + greeks cap 5c", **_M, join_theta=0.0, greeks_cap=0.05),
+    Params("measured, max pos 100", **{**_M, "max_pos": 100}),
+    Params("measured +5ms everywhere", **{**_M, "place_latency_ms": 22, "cancel_latency_ms": 18, "signal_latency_ms": 27}),
+    Params("FIX-like (place 8 / cancel 6 / signal 15)", **{**_M, "place_latency_ms": 8, "cancel_latency_ms": 6, "signal_latency_ms": 15}),
+]
+
+LATSWEEP = [
+    Params(f"place {a} / cancel {b} / signal {c}", **{**_M, "place_latency_ms": a, "cancel_latency_ms": b, "signal_latency_ms": c})
+    for a, b, c in ((2, 2, 2), (3, 3, 6), (5, 4, 8), (5, 4, 15), (8, 6, 8), (8, 6, 15), (11, 7, 18), (17, 13, 22))
+]
+
 PERMKT = [
     Params("base (2ms, cancel $2/1s, stop 5min, max pos 200)", **_G, stop_before_s=300),
     Params("base, max pos 100", latency_ms=2, signal_move=2.0, stop_before_s=300, max_pos=100),
@@ -930,8 +955,10 @@ def main() -> None:
     ap.add_argument("--tables-from", type=date.fromisoformat, default=None, help="fit alpha/edge tables on this day's sweep dataset instead of the run day (walk-forward)")
     ap.add_argument("--walk", action="store_true", help="walk-forward config set")
     ap.add_argument("--per-market", type=Path, default=None, help="run PERMKT configs and write per-market P&L rows to this parquet")
+    ap.add_argument("--measured", action="store_true", help="measured AWS order-entry latencies")
+    ap.add_argument("--latsweep", action="store_true", help="sweep place/cancel/signal latency combinations")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else PERMKT if a.per_market else MEASURED if a.measured else LATSWEEP if a.latsweep else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]

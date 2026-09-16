@@ -54,6 +54,16 @@ func NewSignerFromFile(keyID, path string) (*Signer, error) {
 	return NewSigner(keyID, b)
 }
 
+// LoadPrivateKey reads an RSA private key PEM file (for callers that sign
+// something other than HTTP requests, e.g. a FIX Logon).
+func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("kalshi: read private key: %w", err)
+	}
+	return parsePrivateKey(b)
+}
+
 func parsePrivateKey(pemBytes []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {
