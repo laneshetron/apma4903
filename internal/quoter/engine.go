@@ -237,10 +237,32 @@ func (e *Engine) refreshBalance(ctx context.Context) {
 	e.available, e.reservedAtPoll, e.fillCostSincePoll, e.posAtPoll = b, reserved, 0, posNow
 	e.stats.Available = b
 	if !e.haveStart {
-		e.startBalance, e.haveStart = b, true
-		e.log.Info("session start balance", "balance", fmt.Sprintf("%.2f", b))
+		// starting equity = balance + whatever position we inherited, valued at the current mid
+		startPos := 0.0
+		if l != nil && posNow != 0 {
+			e.mu.Unlock()
+			mid, ok := e.waitMid(ctx, l.ticker, 2*time.Second)
+			e.mu.Lock()
+			if !ok {
+				mid = 5000
+			}
+			startPos = posValueAt(posNow, mid)
+		}
+		e.startBalance, e.haveStart = b+startPos, true
+		e.log.Info("session start equity", "balance", fmt.Sprintf("%.2f", b), "position_value", fmt.Sprintf("%.2f", startPos))
 	}
 	e.mu.Unlock()
+}
+
+// posValueAt is the value of a signed YES position at mid ($): long YES at mid, short (NO) at 1-mid.
+func posValueAt(pos book.Qty, mid book.Price) float64 {
+	if pos > 0 {
+		return float64(pos) / 100 * float64(mid) / float64(book.OneDollar)
+	}
+	if pos < 0 {
+		return float64(-pos) / 100 * float64(book.OneDollar-mid) / float64(book.OneDollar)
+	}
+	return 0
 }
 
 // sessionPnL is the session's P&L for the loss limit. Live: the exchange's
@@ -254,12 +276,7 @@ func (e *Engine) sessionPnL(l *Ledger, mid book.Price) float64 {
 			return 0
 		}
 		pos := e.posAtPoll // same instant as the balance; a fresher position would double-count fills the balance has not seen
-		posValue := 0.0
-		if pos > 0 {
-			posValue = float64(pos) / 100 * float64(mid) / float64(book.OneDollar)
-		} else if pos < 0 {
-			posValue = float64(-pos) / 100 * float64(book.OneDollar-mid) / float64(book.OneDollar)
-		}
+		posValue := posValueAt(pos, mid)
 		// equity = exchange balance (cost of the open position already out, settlements in) + open position at mid.
 		// Deliberately no between-poll adjustments: those are estimates, and a stop must not fire on estimates.
 		return e.available - e.startBalance + posValue

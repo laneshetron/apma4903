@@ -526,3 +526,24 @@ func TestEngineFlattensAtTheStop(t *testing.T) {
 		t.Fatalf("cash after a round trip at 50c should be the fee only, got %v", s.Cash)
 	}
 }
+
+func TestEngineSessionStartIncludesRecoveredPosition(t *testing.T) {
+	tk := "KXBTC15M-TEST"
+	src := &fakeSource{books: map[string]*book.Book{tk: mkBook(5000, 100, 4900, 100)}}
+	eng := NewEngine(EngineConfig{
+		Params: Params{Size: 5 * 100, MaxPos: 50 * 100, StopBefore: 5 * time.Minute}, Limits: testLimits(), Mode: "live", Exec: &fakeExec{}, Feed: src,
+		Balance: func(context.Context) (float64, error) { return 60, nil },
+		Recover: func(context.Context, string) (book.Qty, error) { return 20 * 100, nil }, // 20 YES inherited, worth $10 at the 50c mid
+		PickMarket: func(context.Context) (*Market, error) {
+			return &Market{Ticker: tk, Strike: 76000, CloseAt: time.Now().Add(10 * time.Minute)}, nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = eng.Run(ctx) }()
+	waitFor(t, "recovered", func() bool { return eng.Stats().Pos == "20.00" && eng.Stats().Available == 60 })
+	time.Sleep(200 * time.Millisecond)
+	if s := eng.Stats(); s.SessionPnL < -0.01 || s.SessionPnL > 0.01 {
+		t.Fatalf("an inherited position must not count as session profit, got %v", s.SessionPnL)
+	}
+}
