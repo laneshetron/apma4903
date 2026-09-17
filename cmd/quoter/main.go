@@ -54,6 +54,7 @@ func run() error {
 	maxLoss := flag.Float64("max-loss", 50, "halt when session mark-to-market loss exceeds this ($)")
 	placeLat := flag.Duration("paper-place-latency", 9*time.Millisecond, "paper: simulated place latency")
 	cancelLat := flag.Duration("paper-cancel-latency", 5*time.Millisecond, "paper: simulated cancel latency")
+	feedLag := flag.Duration("paper-feed-lag", 7*time.Millisecond, "paper: engine -> public feed delay (orders seen within it were ahead of us)")
 	statusAddr := flag.String("status", "127.0.0.1:8082", "status HTTP address")
 	flag.Parse()
 
@@ -121,6 +122,7 @@ func run() error {
 			bv, ok := fd.Book(tk)
 			return bv.Book, ok
 		}, func(id string, f quoter.Fill) { eng.PaperFill(id, f) })
+		paper.FeedLag = *feedLag
 		exec = paper
 	} else {
 		bucket := quoter.NewTokenBucket(300, 600) // Advanced tier write budget

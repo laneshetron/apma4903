@@ -18,8 +18,13 @@ import (
 type PaperExecutor struct {
 	PlaceLatency  time.Duration
 	CancelLatency time.Duration
-	Book          func(ticker string) (*book.Book, bool) // current public book
-	OnFill        func(fillID string, f Fill)
+	// FeedLag is how long after an engine event we see it on the public feed
+	// (~6-7 ms measured). Orders that reach the engine in that window before
+	// ours are still ahead of us even though we see them later; trades we see
+	// within FeedLag of our cancel happened before the cancel and still fill us.
+	FeedLag time.Duration
+	Book    func(ticker string) (*book.Book, bool) // current public book
+	OnFill  func(fillID string, f Fill)
 
 	mu       sync.Mutex
 	nextID   int
@@ -43,18 +48,36 @@ type pendingDelta struct {
 }
 
 type paperOrder struct {
-	id     string
-	key    levelKey
-	qty    book.Qty // remaining
-	ahead  float64  // contracts-units ahead of us in the queue
-	liveAt time.Time
-	live   bool
+	id       string
+	key      levelKey
+	qty      book.Qty  // remaining
+	ahead    float64   // contracts-units ahead of us in the queue
+	liveAt   time.Time // engine time the order became live
+	cancelAt time.Time // engine time the cancel took effect (zero while working)
+}
+
+// fillable reports whether a public trade seen at rx (engine time ~ rx - FeedLag) reaches this order.
+func (o *paperOrder) fillable(rx time.Time, feedLag time.Duration) bool {
+	engineT := rx.Add(-feedLag)
+	if engineT.Before(o.liveAt) {
+		return false
+	}
+	return o.cancelAt.IsZero() || engineT.Before(o.cancelAt)
 }
 
 // NewPaperExecutor returns a simulator using bookFn for level sizes.
 func NewPaperExecutor(placeLat, cancelLat time.Duration, bookFn func(string) (*book.Book, bool), onFill func(string, Fill)) *PaperExecutor {
 	return &PaperExecutor{PlaceLatency: placeLat, CancelLatency: cancelLat, Book: bookFn, OnFill: onFill,
 		orders: map[string]*paperOrder{}, pending: map[levelKey][]pendingDelta{}}
+}
+
+// gc drops cancelled orders once no in-flight trade can still reach them.
+func (p *PaperExecutor) gcLocked(now time.Time) {
+	for id, o := range p.orders {
+		if !o.cancelAt.IsZero() && now.After(o.cancelAt.Add(p.FeedLag)) {
+			delete(p.orders, id)
+		}
+	}
 }
 
 // Place joins the queue at price after PlaceLatency.
@@ -68,7 +91,7 @@ func (p *PaperExecutor) Place(ctx context.Context, ticker string, side book.Side
 	defer p.mu.Unlock()
 	p.nextID++
 	id := fmt.Sprintf("paper-%d", p.nextID)
-	o := &paperOrder{id: id, key: levelKey{ticker, side, price}, qty: qty, liveAt: time.Now(), live: true}
+	o := &paperOrder{id: id, key: levelKey{ticker, side, price}, qty: qty, liveAt: time.Now()}
 	if b, ok := p.Book(ticker); ok {
 		for _, l := range b.Bids(side) {
 			if l.Price == price {
@@ -90,11 +113,15 @@ func (p *PaperExecutor) Cancel(ctx context.Context, _ string, orderID string) (t
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.orders[orderID]; !ok {
+	o, ok := p.orders[orderID]
+	if !ok || !o.cancelAt.IsZero() {
 		return time.Time{}, ErrOrderDone
 	}
-	delete(p.orders, orderID)
-	return time.Now(), nil
+	o.cancelAt = time.Now()
+	if p.FeedLag == 0 {
+		delete(p.orders, orderID)
+	}
+	return o.cancelAt, nil
 }
 
 // Ahead returns the simulated queue position of orderID (contracts), for the tape.
@@ -102,7 +129,7 @@ func (p *PaperExecutor) Ahead(orderID string) (float64, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	o, ok := p.orders[orderID]
-	if !ok {
+	if !ok || !o.cancelAt.IsZero() {
 		return 0, false
 	}
 	return o.ahead / 100, true
@@ -113,13 +140,20 @@ func (p *PaperExecutor) Ahead(orderID string) (float64, bool) {
 // cancels ahead of us after a grace period. levelBefore is the level's
 // quantity before the delta.
 func (p *PaperExecutor) OnDelta(rx time.Time, ticker string, side book.Side, price book.Price, delta book.Qty, tsMs int64, levelBefore book.Qty) {
-	if delta >= 0 {
-		return
-	}
 	k := levelKey{ticker, side, price}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.anyOrderAt(k) {
+	p.gcLocked(rx)
+	if delta > 0 {
+		// an add we see within FeedLag of going live reached the engine before we did
+		for _, o := range p.orders {
+			if o.key == k && o.cancelAt.IsZero() && rx.Before(o.liveAt.Add(p.FeedLag)) {
+				o.ahead += float64(delta)
+			}
+		}
+		return
+	}
+	if delta == 0 || !p.anyOrderAt(k) {
 		return
 	}
 	p.pending[k] = append(p.pending[k], pendingDelta{rx: rx, ts: tsMs, qty: -delta, levelBefore: levelBefore})
@@ -152,7 +186,7 @@ func (p *PaperExecutor) flushLocked(now time.Time, k levelKey) {
 // cancelAheadLocked applies qty of cancels at level k, pro rata to our position in the queue.
 func (p *PaperExecutor) cancelAheadLocked(k levelKey, qty book.Qty, levelBefore book.Qty) {
 	for _, o := range p.orders {
-		if o.key != k || !o.live {
+		if o.key != k || !o.cancelAt.IsZero() {
 			continue
 		}
 		if levelBefore > 0 && o.ahead > 0 {
@@ -175,6 +209,7 @@ func (p *PaperExecutor) OnTrade(rx time.Time, ticker string, yesPrice book.Price
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.gcLocked(rx)
 	if !p.anyOrderAt(k) {
 		return
 	}
@@ -196,7 +231,7 @@ func (p *PaperExecutor) OnTrade(rx time.Time, ticker string, yesPrice book.Price
 	// fills: trades consume the queue from the front
 	var fills []Fill
 	for _, o := range p.orders {
-		if o.key != k || !o.live {
+		if o.key != k || !o.fillable(rx, p.FeedLag) {
 			continue
 		}
 		q := float64(qty)
@@ -231,6 +266,7 @@ func (p *PaperExecutor) OnTrade(rx time.Time, ticker string, yesPrice book.Price
 func (p *PaperExecutor) Tick(now time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.gcLocked(now)
 	for k := range p.pending {
 		if len(p.pending[k]) > 0 {
 			p.flushLocked(now, k)
