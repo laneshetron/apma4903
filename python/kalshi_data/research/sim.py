@@ -1152,6 +1152,7 @@ EVAL3 = [
 
 # the depth gate joins behind 1000+ contracts: does its edge survive the queue model nobody has measured?
 EVAL4 = [
+    Params("baseline, prorata queue", **_A3),
     Params("baseline, pessimistic queue", **_A3, queue="pessimistic"),
     Params("depth 500, pessimistic queue", **_A3, min_depth=500, queue="pessimistic"),
     Params("depth 1000, pessimistic queue", **_A3, min_depth=1000, queue="pessimistic"),
@@ -1313,7 +1314,7 @@ def main() -> None:
          "Touch quoter, 100 contracts/side unless noted, max position 500, quoting stops 2 min before expiry, inventory marked at mid. "
          "No market impact. See `python/kalshi_data/research/sim.py`.", "",
          "| config | " + " | ".join(cols) + " |", "|" + "---|" * (len(cols) + 1)]
-    if a.probe:
+    if a.probe or a.eval4:
         for r in res:
             print(f"{r['name']}: advance {r['probe_advance_per_s']:.0f} contracts/s | ahead at placement p50 {r['probe_ahead_at_place_p50']:.0f} | "
                   f"orders filled {r['probe_fill_rate']*100:.0f}% | time to first fill p50 {r['probe_ttf_p50']:.2f}s p90 {r['probe_ttf_p90']:.1f}s | "

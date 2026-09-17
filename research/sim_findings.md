@@ -440,3 +440,17 @@ Next: neighbourhood of A3 (`--eval2`: depth 200/300/500 alone, age 0.5/1/2 s, + 
 - Mechanism: the gate is a presence veto, so we only rest on thick levels and leave as a level thins. At depth 1000 on 09-17: 2,205 fills, 40% by price priority (sweeps through a thick level), 29% improves, the rest queue advancement; fill markout +0.21¢/contract at 30 s vs −0.05¢ for the baseline. A sweep that clears 1,000+ contracts is rarer and, when it happens, we are far back and lose little; a sweep through a 200-lot level is the informed trade.
 - Size scales: size 50 / cap 50 with depth 1000 gives +$6.2/market (t 5.1), i.e. ~$600/day at 96 markets on ~$170 of collateral in use — but the sim has no market impact above ~100-lot joins and the pessimistic-queue check below matters more at these depths.
 - Imbalance on top of the depth gate halves volume for no gain; size skew at cap 40 adds ~+2.6/market on top of depth 1000 (unlike at cap 40 without the gate, where it lost).
+
+### Does the depth gate survive the queue model? (`--eval4`, pessimistic = no advancement from cancels ahead)
+
+| config | prorata $/mkt (t) | pessimistic $/mkt (t) | orders filled: prorata / pessimistic |
+|---|---|---|---|
+| baseline 20/20 | −1.36 (−1.8) | −3.78 (−5.6) | 33% / 16% |
+| depth ≥ 500 | +2.08 (3.8) | +0.08 (0.1) | — / 7% |
+| depth ≥ 1000 | +2.57 (4.8) | +0.40 (0.5) | — / 5% |
+| depth ≥ 1500 | +2.90 (5.6) | −0.03 (0.0) | — / 4% |
+| depth 1000, size 50 | +6.17 (5.1) | +1.47 (0.9) | — / 5% |
+
+Under the pessimistic queue the depth gate is ~zero: joining behind 1,000 contracts only pays if the queue in front of us actually drains. So the whole edge rests on the queue-advancement model, which has never been measured directly. The indirect evidence points the right way: live orders (994, 09-17 04:13–04:45) filled **48%** of the time with time-to-first-fill p50 0.71 s, vs 33% / 0.85 s for the sim's pro-rata model and 16% / 0.60 s pessimistic on the same day under the corrected model — live advances at least as fast as pro-rata, so pessimistic is a floor and pro-rata is not optimistic. But the depth-gated configs are precisely the ones that sit deep in the queue, where the model matters most, and 48% was measured for a chasing quoter that mostly sat at thin, fresh levels.
+
+Decision: the depth gate is the candidate rule, and the queue-advancement rate at thick levels is the number to measure next — from the paper quoter running `-min-depth 1000` (its fill rate vs the sim's on the same markets) and, in a bounded live test, from `GET /portfolio/orders/{id}/queue_position` polled on every resting order. Pro-rata at +2.6/market and pessimistic at +0.4 bracket the truth; live at size 5–20 with the gate cannot lose much either way (worst market −$5 at size 20).
