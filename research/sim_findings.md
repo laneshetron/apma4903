@@ -491,3 +491,17 @@ Hourly: the whole drag is one 3-hour stretch, 09:00–12:00 UTC on 09-17 (right 
 ### Paper under `-min-depth 1000` vs the sim (from 16:22 UTC, `paper_vs_sim --config "depth 1000 only"`)
 
 First 6 markets (12:30–13:45 ET): paper +$17.0 vs sim +$5.5; fills 590 vs 542; contracts 7,932 vs 7,907; sweep share 12–34% vs 1–30%. Volume matches to 1% — the gate engages on live books the way the sim says. The P&L gap is one market (13:45: paper +3.6 vs sim −8.1; the market ran to 5¢ and paper's endgame flatten covered 14 lots there) — n = 6, per-market SD ≈ $4. Paper's fill count is pro-rata by construction, so this confirms engagement and sweep share, not queue advancement.
+
+## 2026-09-17 18:46–19:45 UTC — bounded live test of the depth gate (size 10 / cap 10 / min depth 1000)
+
+Stopped after 4 markets: −$0.43, −$1.86, −$4.31, −$3.10 = **−$9.70** (exchange balance $56.07 → $46.48). 237 maker fills / ~2,100 contracts, 61 post-only-cross rejections, 0 errors, no halt; every market flattened at the stop. Tape: `data_aws/quoter/live/raw/2026-09-17/{18,19}.jsonl.gz` (with `queue_pos` events).
+
+What the run was for — the queue-advancement rate behind thick levels — is answered, and not in the gate's favour:
+
+- **Exchange queue positions** (`GET /portfolio/orders/queue_positions`, 1 Hz): orders join behind a median 3,800 contracts; the quantity ahead shrinks at ~770 contracts/s (trades + cancels), i.e. the *pessimistic* sim's rate (~850/s), not pro-rata's (~2,200/s).
+- **Fills never come from the queue draining.** For 99 join fills with a reading ≤ 0.4 s before the fill: median 1,800 contracts still ahead, 94% > 500, 1% < 100. The fills are trades through the level (price priority), which is the informed flow the gate was meant to avoid.
+- **Markouts** (first 3 markets, 128 fills / 1,126 contracts): half-spread +0.33¢, markout −0.18¢ @1 s, −0.38¢ @10 s, net −0.09¢/contract @30 s; full-sweep fills 29% of contracts at −1.74¢, the rest +0.58¢. Same shape as the baseline live run of 09-17 04:13.
+- Order lifetime p50 0.32 s: the touch size oscillates around the 1,000 threshold and the touch moves, so the presence veto churns the order and we are perpetually the newest order at the level.
+- 161 of 162 fills were joins; 1 improve.
+
+Conclusion: at REST latency on KXBTC15M, a passive touch-joiner's fills are sweeps whatever the depth gate does; the queue in front of us does not turn over within an order's life. The pro-rata queue model — which every positive sim number depended on — is wrong for thick levels on this venue, and the honest sim estimate for the depth gate is the pessimistic one (≈ $0 to slightly negative). The remaining levers are front-of-queue placement (improves earned +1.81¢ live; the sim shows an edge only at ~2 ms placement, i.e. FIX/Premier) or a different contract/venue where the queue turns over.
