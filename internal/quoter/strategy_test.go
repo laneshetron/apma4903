@@ -398,3 +398,52 @@ func TestImproveUsesTaperedTickInTails(t *testing.T) {
 		t.Fatalf("tail join prices = %v, want yes 9500 / no 490", got)
 	}
 }
+
+// The thin-touch veto: don't join a touch thinner than MinDepth, leave one that thins
+// (our own resting quantity does not count), and never block an improve.
+func TestMinDepthVeto(t *testing.T) {
+	p, in := base()
+	p.MinDepth = 1000 * 100
+	in.Book = mkBook(5000, 800*100, 4900, 5000*100) // YES touch 800 thin, NO touch 5000 fine; 1c spread -> join
+	s := NewStrategy(p)
+	placed := map[book.Side]bool{}
+	for _, a := range s.Decide(in) {
+		if a.Kind == Place {
+			placed[a.Side] = true
+		}
+	}
+	if placed[book.Yes] || !placed[book.No] {
+		t.Fatalf("want NO only, got %v (vetoes %v)", placed, s.Vetoes)
+	}
+	// resting on NO with 20 lots of our own: level 1010 public = 990 others -> leave
+	in.Orders = map[book.Side]*OrderView{book.No: {ID: "n", Side: book.No, Price: 4900, Qty: 20 * 100, State: Resting}}
+	in.Book = mkBook(5000, 5000*100, 4900, 1010*100)
+	var cancelled bool
+	for _, a := range s.Decide(in) {
+		if a.Kind == Cancel && a.Side == book.No {
+			cancelled = true
+		}
+	}
+	if !cancelled {
+		t.Fatal("thinning level should be left")
+	}
+	// 1020 public = 1000 others: stay
+	in.Book = mkBook(5000, 5000*100, 4900, 1020*100)
+	for _, a := range s.Decide(in) {
+		if a.Kind == Cancel && a.Side == book.No {
+			t.Fatal("level at the threshold should be kept")
+		}
+	}
+	// a 2c spread is improved regardless of the touch depth
+	in.Orders = nil
+	in.Book = mkBook(5000, 10*100, 4800, 10*100)
+	n := 0
+	for _, a := range NewStrategy(p).Decide(in) {
+		if a.Kind == Place {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("improve should not be depth-gated, got %d places", n)
+	}
+}

@@ -417,3 +417,26 @@ Model: price priority, engine lag 6 ms added to placement/cancel (AWS tape 9/5 �
 - Standing size 100/200 loses at 9 ms with or without gates; nothing above size 20 is justified.
 
 Next: neighbourhood of A3 (`--eval2`: depth 200/300/500 alone, age 0.5/1/2 s, + offset, + skew, + imbalance, size 10, carry) to check that A3 is not a knife-edge before porting the depth/age gate to the Go quoter.
+
+### A3 neighbourhood and depth-threshold sweeps (`--eval2`, `--eval3`; 44 markets pooled)
+
+| config | 09-16 | 09-17 | pooled $/mkt (t) | win | contracts | worst mkt |
+|---|---|---|---|---|---|---|
+| depth ≥ 2000 only | +2.98 | +2.96 | **+2.97 (6.2)** | 86% | 44,643 | −5.0 |
+| depth ≥ 1500 only | +2.68 | +3.18 | +2.90 (5.6) | 82% | 50,154 | −5.1 |
+| depth ≥ 1000 only | +2.79 | +2.28 | +2.57 (4.8) | 77% | 59,426 | −4.0 |
+| depth ≥ 750 only | +2.99 | +1.87 | +2.51 (5.0) | 77% | 65,415 | −3.4 |
+| depth ≥ 500 only | +2.58 | +1.41 | +2.08 (3.8) | 77% | 73,122 | −7.8 |
+| depth ≥ 300 only | +1.45 | +1.43 | +1.44 (2.9) | 70% | 80,831 | |
+| depth ≥ 200 only | +1.03 | +0.95 | +1.00 (1.6) | 61% | 87,099 | |
+| A3 = age 1 s + depth 300 | +0.50 | +1.16 | +0.78 (1.2) | 57% | 60,280 | |
+| depth 1000 + imbalance 0.33 | +2.89 | +2.34 | +2.65 (4.7) | 75% | 35,041 | −8.8 |
+| depth 1000 + cap 40 size skew | +5.32 | +4.99 | +5.18 (5.1) | 84% | 103,857 | −12.6 |
+| depth 1000, size 50 / cap 50 | +6.42 | +5.85 | **+6.17 (5.1)** | 84% | 136,159 | −13.3 |
+| depth 500, size 50 / cap 50 | +6.49 | +3.44 | +5.17 (4.1) | 75% | 167,778 | −12.9 |
+| A3 + offset 1 tick / size 10 / carry / age 2 s | ≈ 0 | | | | | |
+
+- **The level-age gate was a mistake; the depth gate alone is the edge.** Removing the age condition from A3 nearly doubles it (+0.78 → +1.44), and the gate is monotone in the threshold up to ~1,500–2,000 contracts, positive on both days at every threshold ≥ 300, with 77–86% winning markets and the worst market at −$5. It is one parameter, so the selection bias from ~37 configs on 44 markets is limited, but the threshold itself (1,000 vs 2,000) is within noise.
+- Mechanism: the gate is a presence veto, so we only rest on thick levels and leave as a level thins. At depth 1000 on 09-17: 2,205 fills, 40% by price priority (sweeps through a thick level), 29% improves, the rest queue advancement; fill markout +0.21¢/contract at 30 s vs −0.05¢ for the baseline. A sweep that clears 1,000+ contracts is rarer and, when it happens, we are far back and lose little; a sweep through a 200-lot level is the informed trade.
+- Size scales: size 50 / cap 50 with depth 1000 gives +$6.2/market (t 5.1), i.e. ~$600/day at 96 markets on ~$170 of collateral in use — but the sim has no market impact above ~100-lot joins and the pessimistic-queue check below matters more at these depths.
+- Imbalance on top of the depth gate halves volume for no gain; size skew at cap 40 adds ~+2.6/market on top of depth 1000 (unlike at cap 40 without the gate, where it lost).

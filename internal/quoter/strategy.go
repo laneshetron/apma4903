@@ -31,6 +31,7 @@ type Params struct {
 	Cooldown      time.Duration // no re-quote on the stale side for this long after a signal
 	JoinTheta     *float64      // join gate: refuse to join when expected edge < -theta (cents); nil disables
 	GreeksCap     *float64      // don't quote when a 1-sigma 10s spot move is worth >= cap (fraction of $1); nil disables
+	MinDepth      book.Qty      // don't rest on a touch level with fewer than this many contracts (ours excluded); 0 disables
 	MinPrice      book.Price    // don't quote below this (default 1c)
 	MaxPrice      book.Price    // don't quote above this (default 99c)
 	FlattenAtStop bool          // at the endgame stop, cross the spread to close the position instead of carrying it
@@ -223,9 +224,27 @@ func (s *Strategy) Decide(in Inputs) []Action {
 		}
 	}
 	depth := map[book.Side]book.Qty{book.Yes: bestYes.Qty, book.No: bestNo.Qty}
+	for side, o := range in.Orders { // the public level includes our own resting quantity
+		if o != nil && o.State == Resting && o.Price == want[side] && !improve[side] {
+			depth[side] -= o.Qty
+			if depth[side] < 0 {
+				depth[side] = 0
+			}
+		}
+	}
 
 	lim := s.P.MaxPos - s.P.Size
 	allow := map[book.Side]bool{book.Yes: in.Pos <= lim, book.No: in.Pos >= -lim}
+	if s.P.MinDepth > 0 {
+		// thin-touch veto: a level thinner than MinDepth is the one a sweep finishes on;
+		// applies while resting too, so we leave as the level thins (the sim's "thin" veto)
+		for _, side := range []book.Side{book.Yes, book.No} {
+			if allow[side] && !improve[side] && depth[side] < s.P.MinDepth {
+				allow[side] = false
+				s.Vetoes["thin"]++
+			}
+		}
+	}
 	if s.P.GreeksCap != nil && in.Spot != nil {
 		if g, ok := in.Spot.DeltaSigma10(in.Strike, in.CloseAt); ok && g >= *s.P.GreeksCap {
 			allow[book.Yes], allow[book.No] = false, false

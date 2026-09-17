@@ -49,6 +49,7 @@ func run() error {
 	stopBefore := flag.Duration("stop-before", 5*time.Minute, "stop quoting this long before close")
 	signalMove := flag.Float64("signal-move", 2.0, "$ Coinbase 1s move that pulls the stale side")
 	greeksCap := flag.Float64("greeks-cap", 0.05, "don't quote when a 1-sigma 10s move is worth >= this (fraction of $1); 0 disables")
+	minDepth := flag.Int("min-depth", 0, "don't rest on a touch level thinner than this many contracts (ours excluded); 0 disables")
 	joinTheta := flag.Float64("join-theta", 0, "join gate threshold in cents (edge < -theta vetoes); needs -tables")
 	noJoinGate := flag.Bool("no-join-gate", false, "disable the join gate")
 	flatten := flag.Bool("flatten-at-stop", true, "cross the spread to close the position at the endgame stop instead of carrying it to settlement")
@@ -97,6 +98,7 @@ func run() error {
 		gc := *greeksCap
 		params.GreeksCap = &gc
 	}
+	params.MinDepth = book.Qty(*minDepth * 100)
 	limits := quoter.DefaultLimits()
 	limits.MaxAbsPos = book.Qty(*maxPos * 100)
 	limits.MaxLoss = *maxLoss
@@ -216,6 +218,9 @@ func paramsJSON(p quoter.Params) map[string]any {
 	}
 	if p.GreeksCap != nil {
 		out["greeks_cap"] = *p.GreeksCap
+	}
+	if p.MinDepth > 0 {
+		out["min_depth"] = p.MinDepth.String()
 	}
 	return out
 }

@@ -1150,6 +1150,15 @@ EVAL3 = [
     Params("depth 1000, size 50 / cap 50", **{**_A3, "size": 50, "max_pos": 50}, min_depth=1000),
 ]
 
+# the depth gate joins behind 1000+ contracts: does its edge survive the queue model nobody has measured?
+EVAL4 = [
+    Params("baseline, pessimistic queue", **_A3, queue="pessimistic"),
+    Params("depth 500, pessimistic queue", **_A3, min_depth=500, queue="pessimistic"),
+    Params("depth 1000, pessimistic queue", **_A3, min_depth=1000, queue="pessimistic"),
+    Params("depth 1500, pessimistic queue", **_A3, min_depth=1500, queue="pessimistic"),
+    Params("depth 1000, pessimistic, size 50 / cap 50", **{**_A3, "size": 50, "max_pos": 50}, min_depth=1000, queue="pessimistic"),
+]
+
 PRIORITY = [
     Params("live config, prorata, 9/5/11 (old model)", **_Q, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
     Params("live config, prorata + price priority", **_Q, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, price_priority=True),
@@ -1294,8 +1303,9 @@ def main() -> None:
     ap.add_argument("--eval", action="store_true", help="post-audit evaluation set under the corrected model (AWS tape)")
     ap.add_argument("--eval2", action="store_true", help="neighbourhood of the EVAL winner (A3)")
     ap.add_argument("--eval3", action="store_true", help="depth-gate threshold sweep")
+    ap.add_argument("--eval4", action="store_true", help="depth gate under the pessimistic (no advancement) queue")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
