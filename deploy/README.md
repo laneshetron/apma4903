@@ -37,3 +37,10 @@ and restart on failure. Root volume grown to 100 GB (~1 month of raw data).
 - Update a binary: scp to `~/stage`, `sudo install -m755 -o kalshi ... /opt/kalshi/bin/`, `sudo systemctl restart kalshi-<name>`
 - Status: `curl 127.0.0.1:8080/status` (collector), `:8081/status` (spot); logs in `/opt/kalshi/logs/`
 - Pull data: `deploy/sync.sh` -> `./data_aws/`; analysis tools take `--data-dir ../data_aws`
+
+## Quoter host (use2-az2, c7g.medium arm64, i-015eab555615848a2, 18.116.32.119)
+
+Runs `kalshi-quoter-paper` (and `kalshi-quoter-live` when enabled) only; the recorders stay on the t3.micro.
+Build with `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o build/arm64/quoter ./cmd/quoter`.
+Latency checks: `deploy/azprobe.py` (network) and the paper tape's `ack_ms - 9` (scheduling delay; ~1 ms p50 is
+Go timer granularity, watch p90/p99). Measured 2026-09-17: p50 1.2 / p90 2.3 / p99 7.5 ms.
