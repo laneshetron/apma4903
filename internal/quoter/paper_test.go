@@ -24,6 +24,25 @@ func paperSetup(t *testing.T, levelQty int) (*PaperExecutor, *[]Fill, string) {
 	return p, &fills, id
 }
 
+// paperSetupSide rests 100 lots on side at price with levelQty already at the level.
+func paperSetupSide(t *testing.T, side book.Side, price book.Price, levelQty int) (*PaperExecutor, *[]Fill, string) {
+	t.Helper()
+	b := book.New()
+	lv := []book.Level{{Price: price, Qty: book.Qty(levelQty * 100)}}
+	if side == book.Yes {
+		b.ApplySnapshot(lv, []book.Level{{Price: book.OneDollar - price - 100, Qty: 100000}})
+	} else {
+		b.ApplySnapshot([]book.Level{{Price: book.OneDollar - price - 100, Qty: 100000}}, lv)
+	}
+	var fills []Fill
+	p := NewPaperExecutor(0, 0, func(string) (*book.Book, bool) { return b, true }, func(_ string, f Fill) { fills = append(fills, f) })
+	id, _, err := p.Place(context.Background(), "M", side, price, 100*100, "c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p, &fills, id
+}
+
 func TestPaperFillsAfterQueueAhead(t *testing.T) {
 	p, fills, id := paperSetup(t, 300)
 	now := time.Now()
@@ -57,12 +76,46 @@ func TestPaperTradesOnOtherSideDoNotFill(t *testing.T) {
 	if len(*fills) != 0 {
 		t.Fatalf("wrong side filled: %v", *fills)
 	}
-	p.OnTrade(now, "M", 4900, 100*100, "no", 2) // YES bids at 49c, not ours at 50c
+	p.OnTrade(now, "M", 5100, 100*100, "no", 2) // YES bids at 51c, ahead of ours at 50c in price
 	if len(*fills) != 0 {
 		t.Fatalf("wrong price filled: %v", *fills)
 	}
 	if _, ok := p.Ahead(id); !ok {
 		t.Fatal("order should still be live")
+	}
+}
+
+// Price priority: a taker who traded at a worse price than ours would have
+// taken our order first, whatever our queue position.
+func TestPaperPricePriorityFillsThroughOurLevel(t *testing.T) {
+	p, fills, id := paperSetup(t, 400) // 400 ahead of us at 50c
+	now := time.Now()
+	p.OnTrade(now, "M", 5000, 100*100, "no", 1) // 100 at our level: still 300 ahead, no fill
+	if len(*fills) != 0 {
+		t.Fatalf("queue ignored: %v", *fills)
+	}
+	p.OnTrade(now, "M", 4900, 30*100, "no", 2) // the sweep continued at 49c: 30 of ours must have gone first
+	if len(*fills) != 1 || (*fills)[0].Price != 5000 || (*fills)[0].Qty != 30*100 || (*fills)[0].Side != book.Yes {
+		t.Fatalf("want a 30-lot fill at our price, got %v", *fills)
+	}
+	if a, ok := p.Ahead(id); !ok || a != 0 {
+		t.Fatalf("after a trade through us nothing is ahead, got %v %v", a, ok)
+	}
+	if p.PriorityFills() != 1 {
+		t.Fatalf("priority fills = %d", p.PriorityFills())
+	}
+	// NO side: we bid NO at 50c; a taker buying YES at 51c (NO bids at 49c) went through us
+	p2, fills2, _ := paperSetupSide(t, book.No, 5000, 400)
+	p2.OnTrade(time.Now().Add(time.Second), "M", 5100, 200*100, "yes", 3)
+	if len(*fills2) != 1 || (*fills2)[0].Side != book.No || (*fills2)[0].Price != 5000 || (*fills2)[0].Qty != 100*100 {
+		t.Fatalf("NO-side priority fill wrong: %v", *fills2)
+	}
+	// a cancelled order is not filled by a later sweep
+	p3, fills3, id3 := paperSetup(t, 400)
+	p3.Cancel(context.Background(), "M", id3)
+	p3.OnTrade(time.Now().Add(time.Second), "M", 4900, 30*100, "no", 4)
+	if len(*fills3) != 0 {
+		t.Fatalf("cancelled order filled: %v", *fills3)
 	}
 }
 

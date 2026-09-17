@@ -363,3 +363,38 @@ func TestFlattenAtStopTakesTheTouch(t *testing.T) {
 		t.Fatalf("with FlattenAtStop off nothing should be sent, got %v", as)
 	}
 }
+
+func TestTickAtTaperedGrid(t *testing.T) {
+	for px, want := range map[book.Price]book.Price{50: 10, 990: 10, 1000: 100, 5000: 100, 8990: 100, 9000: 10, 9950: 10} {
+		if got := TickAt(px); got != want {
+			t.Errorf("TickAt(%d) = %d, want %d", px, got, want)
+		}
+	}
+}
+
+// In the tails the grid is 0.1c: a 0.2c spread is improvable by 0.1c, not 1c.
+func TestImproveUsesTaperedTickInTails(t *testing.T) {
+	p, in := base()
+	in.Book = mkBook(9500, 100000, 480, 100000) // YES 95.0 / ask 95.2 -> improve to 95.1 and NO 4.9
+	s := NewStrategy(p)
+	got := map[book.Side]book.Price{}
+	for _, a := range s.Decide(in) {
+		if a.Kind == Place {
+			got[a.Side] = a.Price
+		}
+	}
+	if got[book.Yes] != 9510 || got[book.No] != 490 {
+		t.Fatalf("tail improve prices = %v, want yes 9510 / no 490", got)
+	}
+	in.Book = mkBook(9500, 100000, 490, 100000) // 95.0 / 95.1: one tail tick wide, join
+	s = NewStrategy(p)
+	got = map[book.Side]book.Price{}
+	for _, a := range s.Decide(in) {
+		if a.Kind == Place {
+			got[a.Side] = a.Price
+		}
+	}
+	if got[book.Yes] != 9500 || got[book.No] != 490 {
+		t.Fatalf("tail join prices = %v, want yes 9500 / no 490", got)
+	}
+}

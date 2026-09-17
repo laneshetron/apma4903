@@ -26,10 +26,11 @@ type PaperExecutor struct {
 	Book    func(ticker string) (*book.Book, bool) // current public book
 	OnFill  func(fillID string, f Fill)
 
-	mu       sync.Mutex
-	nextID   int
-	nextFill int
-	orders   map[string]*paperOrder
+	mu            sync.Mutex
+	nextID        int
+	nextFill      int
+	priorityFills int // fills received only because a trade went through our level
+	orders        map[string]*paperOrder
 	// negative deltas at a level awaiting the trade that explains them
 	pending map[levelKey][]pendingDelta
 }
@@ -153,6 +154,13 @@ func (p *PaperExecutor) Take(ctx context.Context, ticker string, side book.Side,
 	return id, time.Now(), nil
 }
 
+// PriorityFills returns how many fills came from trades through our level (price priority).
+func (p *PaperExecutor) PriorityFills() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.priorityFills
+}
+
 // Ahead returns the simulated queue position of orderID (contracts), for the tape.
 func (p *PaperExecutor) Ahead(orderID string) (float64, bool) {
 	p.mu.Lock()
@@ -187,6 +195,16 @@ func (p *PaperExecutor) OnDelta(rx time.Time, ticker string, side book.Side, pri
 	}
 	p.pending[k] = append(p.pending[k], pendingDelta{rx: rx, ts: tsMs, qty: -delta, levelBefore: levelBefore})
 	p.flushLocked(rx, k)
+}
+
+// anyOrderOnSide reports whether we rest anywhere on k's side of the book at or above k.price.
+func (p *PaperExecutor) anyOrderOnSide(k levelKey) bool {
+	for _, o := range p.orders {
+		if o.key.ticker == k.ticker && o.key.side == k.side && o.key.price >= k.price {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *PaperExecutor) anyOrderAt(k levelKey) bool {
@@ -239,7 +257,7 @@ func (p *PaperExecutor) OnTrade(rx time.Time, ticker string, yesPrice book.Price
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.gcLocked(rx)
-	if !p.anyOrderAt(k) {
+	if !p.anyOrderOnSide(k) {
 		return
 	}
 	// the trade explains pending negative deltas with the same ts (they are not cancels)
@@ -257,10 +275,30 @@ func (p *PaperExecutor) OnTrade(rx time.Time, ticker string, yesPrice book.Price
 		kept = append(kept, d)
 	}
 	p.pending[k] = kept
-	// fills: trades consume the queue from the front
+	// fills: trades consume the queue from the front. Price priority: a taker
+	// trading at a price worse for them than our resting price would have
+	// taken our order first, so any order of ours at a better price fills
+	// regardless of queue position (a sweep went through our level).
 	var fills []Fill
 	for _, o := range p.orders {
-		if o.key != k || !o.fillable(rx, p.FeedLag) {
+		if o.key.ticker != k.ticker || o.key.side != k.side || !o.fillable(rx, p.FeedLag) {
+			continue
+		}
+		if o.key.price > k.price {
+			o.ahead = 0
+			fq := qty
+			if fq > o.qty {
+				fq = o.qty
+			}
+			o.qty -= fq
+			p.priorityFills++
+			fills = append(fills, Fill{Rx: rx, Ticker: ticker, OrderID: o.id, Side: o.key.side, Price: o.key.price, Qty: fq, Sweep: true})
+			if o.qty == 0 {
+				delete(p.orders, o.id)
+			}
+			continue
+		}
+		if o.key.price != k.price {
 			continue
 		}
 		q := float64(qty)

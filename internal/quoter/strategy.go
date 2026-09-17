@@ -10,8 +10,17 @@ import (
 	"github.com/laneshetron/kalshi/internal/book"
 )
 
-// Tick is one cent, the touch increment the strategy quotes in.
+// Tick is one cent, the touch increment in the middle of the price range.
 const Tick book.Price = 100
+
+// TickAt returns the price increment at price on KXBTC15M's tapered_deci_cent
+// grid: 0.1 cent below 10 cents and from 90 cents up, 1 cent in between.
+func TickAt(price book.Price) book.Price {
+	if price < 1000 || price >= 9000 {
+		return 10
+	}
+	return Tick
+}
 
 // Params are the strategy settings (the sim's Params, standing config).
 type Params struct {
@@ -204,11 +213,14 @@ func (s *Strategy) Decide(in Inputs) []Action {
 		return nil
 	}
 	spread := (book.OneDollar - bestNo.Price) - bestYes.Price
-	improve := spread > Tick
+	tick := map[book.Side]book.Price{book.Yes: TickAt(bestYes.Price), book.No: TickAt(bestNo.Price)}
 	want := map[book.Side]book.Price{book.Yes: bestYes.Price, book.No: bestNo.Price}
-	if improve {
-		want[book.Yes] += Tick
-		want[book.No] += Tick
+	improve := map[book.Side]bool{}
+	for side := range want {
+		if spread > tick[side] { // improve by one tick of the side's grid
+			improve[side] = true
+			want[side] += tick[side]
+		}
 	}
 	depth := map[book.Side]book.Qty{book.Yes: bestYes.Qty, book.No: bestNo.Qty}
 
@@ -267,7 +279,7 @@ func (s *Strategy) Decide(in Inputs) []Action {
 				imb = float64(depth[other]-depth[side]) / float64(depth[other]+depth[side])
 			}
 			qJoin := 0.0
-			if !improve {
+			if !improve[side] {
 				qJoin = float64(depth[side]) / 100
 			}
 			ttx := in.CloseAt.Sub(in.Now).Minutes()
@@ -277,7 +289,7 @@ func (s *Strategy) Decide(in Inputs) []Action {
 			}
 		}
 		reason := "join"
-		if improve {
+		if improve[side] {
 			reason = "improve"
 		}
 		qty := s.P.Size

@@ -385,3 +385,35 @@ A taker that trades at a worse price after clearing our level would, by price pr
 | standing 100/200, 2/2/2 | — | +23.87 | — | +26.52 |
 
 On the two markets traded live (00:30, 00:45 UTC): FIFO + priority gives -$14.5 on 514 fills / 6,380 contracts vs live -$15.5 on 567 fills / 8,491 — the corrected model reproduces the live loss. Conclusion: at the measured ~9 ms placement latency, touch-joining as configured has no edge; the earlier positive estimates were the artefact of ignoring sweeps that went through our level. Only the 2 ms rows remain positive (~$24-27/mkt at the standing size), i.e. the edge exists only at the very front of the queue.
+
+## 2026-09-17 — post-audit evaluation (corrected model, both AWS days)
+
+Model: price priority, engine lag 6 ms added to placement/cancel (AWS tape 9/5 → 15/11 tape-time), tapered tick grid, markets settled from the recorded BRTI 60 s average. 44 markets (25 on 09-16, 19 on 09-17), $100 capital, size 20 / cap 20 unless noted. `research/sim_2026-09-1{6,7}_eval.md`, per-market `permkt_eval_*.parquet`.
+
+| config | 09-16 $/mkt (t) | 09-17 $/mkt (t) | pooled $/mkt (t) | win % | sweep fills* |
+|---|---|---|---|---|---|
+| **A3 join gate: level age ≥ 1 s + depth ≥ 300** | +0.50 (0.5) | +1.16 (1.5) | **+0.78 (1.2)** | 57% | 997 |
+| C2 pre-position 1 tick + persistence | −0.78 | +0.28 | −0.32 (−0.8) | 48% | |
+| C pre-position 1 tick | −1.10 | −0.19 | −0.71 (−1.0) | 52% | |
+| live baseline 20/20 flatten | −0.42 | −2.59 | −1.36 (−1.8) | 48% | 3,180 |
+| A2 level age ≥ 1 s only | −0.65 | −2.43 | −1.42 (−2.2) | 41% | 1,909 |
+| A4 A3 + persistence | −1.27 | −2.30 | −1.71 (−2.8) | 41% | 2,869 |
+| baseline, carry to settlement | −1.66 | −2.66 | −2.09 (−2.1) | | |
+| A1 persistence (min rest 1 s, reprice ≥ 2 ticks) | −1.72 | −2.77 | −2.17 (−3.4) | 34% | |
+| D2 cap 40 + size skew + A4 | −1.05 | −4.19 | −2.41 (−1.9) | | |
+| D cap 40 + size skew | −0.58 | −5.19 | −2.57 (−2.0) | | |
+| standing 100/200 flatten | +1.05 | −13.63 | −5.29 (−0.9) | | |
+| standing 100/200 + A4 | −0.90 | −13.03 | −6.14 (−1.0) | | |
+| raw touch quoter, no gates | −24.73 | −49.16 | −35.28 (−4.4) | | |
+
+\* `priority_fills` on 09-17: fills we only receive because a taker swept through our level.
+
+- **Only A3 is positive on both days**, and it is marginal: +$34 over 44 markets, t = 1.2, and 09-16 is carried by one market (+$9.96; ex-best +$2.42 over the other 24). 09-17 is broad (13/19 winners, median +$2.10). Expect ~$0.5–1/market at size 20, i.e. $50–100/day at 96 markets, before anything the tape cannot see.
+- The ingredient is the **depth gate, not level age**: A2 (age alone) is no better than baseline; A3 cuts sweep fills from 3,180 to 997 and traded volume in half. The gate is also a presence veto (`spread ≤ tick` and our-side depth < 300 → cancel), so it leaves a level as it thins, before the sweep finishes.
+- **Persistence hurts** everywhere (A1 −2.17, A4 < A3, C2 ≈ C): a resting order that is not repriced for 1 s is run over by the next move. The live "orders alive 2–5 s earned +0.44¢" was survivorship — the orders that lived that long were the ones nothing ran through. "Stop chasing" must be done by not joining, not by not leaving.
+- Pre-positioning one tick behind (C) trades a tenth of the volume and still loses; the front-of-queue partials are not enough to pay for being the level a sweep lands on.
+- Size skew at cap 40 (D, D2) is negative under the corrected model — larger inventory only buys more sweep exposure. The old "+75% mean" result is void.
+- Settlement vs flatten: carrying to settlement costs $0.7/market vs flattening at T−5 (baseline −1.36 vs −2.09); flattening stays on.
+- Standing size 100/200 loses at 9 ms with or without gates; nothing above size 20 is justified.
+
+Next: neighbourhood of A3 (`--eval2`: depth 200/300/500 alone, age 0.5/1/2 s, + offset, + skew, + imbalance, size 10, carry) to check that A3 is not a knife-edge before porting the depth/age gate to the Go quoter.

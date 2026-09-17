@@ -48,6 +48,7 @@ type Fill struct {
 	Qty     book.Qty
 	Taker   bool
 	Fee     float64 // dollars, charged for taker fills
+	Sweep   bool    // paper only: filled by price priority (a trade went through our level)
 }
 
 // TakerFee is Kalshi's taker fee on crypto series: 0.07 x p x (1-p) per contract.
@@ -333,7 +334,7 @@ func (l *Ledger) OnFill(fillID string, f Fill) {
 	}
 	l.cash -= f.Fee
 	l.fills = append(l.fills, f)
-	l.onEvent("fill", map[string]any{"order_id": f.OrderID, "side": f.Side.String(), "price": f.Price.String(), "qty": f.Qty.String(), "pos": l.pos.String(), "taker": f.Taker, "fee": f.Fee})
+	l.onEvent("fill", map[string]any{"order_id": f.OrderID, "side": f.Side.String(), "price": f.Price.String(), "qty": f.Qty.String(), "pos": l.pos.String(), "taker": f.Taker, "fee": f.Fee, "sweep": f.Sweep})
 }
 
 // CollateralUsed is what Kalshi holds against the net position: the average

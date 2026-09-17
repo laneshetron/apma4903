@@ -1117,6 +1117,39 @@ EVAL = [
     Params("standing, no gates, flatten (raw touch quoter)", **{**_M2, "join_theta": None, "greeks_cap": None}, size=100, max_pos=200, flatten_at_stop=True),
 ]
 
+# neighbourhood of A3 (the only EVAL config positive on both days): is it a knife-edge?
+_A3 = dict(**_M2, size=20, max_pos=20, capital=100, flatten_at_stop=True)
+EVAL2 = [
+    Params("A3 level age 1s + depth 300 (reference)", **_A3, min_level_age_ms=1000, min_depth=300),
+    Params("depth 300 only", **_A3, min_depth=300),
+    Params("depth 200 only", **_A3, min_depth=200),
+    Params("depth 500 only", **_A3, min_depth=500),
+    Params("level age 0.5s + depth 300", **_A3, min_level_age_ms=500, min_depth=300),
+    Params("level age 2s + depth 300", **_A3, min_level_age_ms=2000, min_depth=300),
+    Params("level age 1s + depth 200", **_A3, min_level_age_ms=1000, min_depth=200),
+    Params("level age 1s + depth 500", **_A3, min_level_age_ms=1000, min_depth=500),
+    Params("A3 + offset 1 tick", **_A3, min_level_age_ms=1000, min_depth=300, offset_ticks=1),
+    Params("A3 + cap 40 size skew", **{**_A3, "max_pos": 40}, min_level_age_ms=1000, min_depth=300, size_skew=True),
+    Params("A3 + imbalance 0.33", **_A3, min_level_age_ms=1000, min_depth=300, imb_thr=0.33),
+    Params("A3, size 10", **{**_A3, "size": 10, "max_pos": 10}, min_level_age_ms=1000, min_depth=300),
+    Params("A3, carry to settlement", **{**_A3, "flatten_at_stop": False}, min_level_age_ms=1000, min_depth=300),
+]
+
+# depth gate alone was monotone 200 < 300 < 500: where does it turn over?
+EVAL3 = [
+    Params("depth 500 only (reference)", **_A3, min_depth=500),
+    Params("depth 750 only", **_A3, min_depth=750),
+    Params("depth 1000 only", **_A3, min_depth=1000),
+    Params("depth 1500 only", **_A3, min_depth=1500),
+    Params("depth 2000 only", **_A3, min_depth=2000),
+    Params("depth 500 + imbalance 0.33", **_A3, min_depth=500, imb_thr=0.33),
+    Params("depth 1000 + imbalance 0.33", **_A3, min_depth=1000, imb_thr=0.33),
+    Params("depth 500 + cap 40 size skew", **{**_A3, "max_pos": 40}, min_depth=500, size_skew=True),
+    Params("depth 1000 + cap 40 size skew", **{**_A3, "max_pos": 40}, min_depth=1000, size_skew=True),
+    Params("depth 500, size 50 / cap 50", **{**_A3, "size": 50, "max_pos": 50}, min_depth=500),
+    Params("depth 1000, size 50 / cap 50", **{**_A3, "size": 50, "max_pos": 50}, min_depth=1000),
+]
+
 PRIORITY = [
     Params("live config, prorata, 9/5/11 (old model)", **_Q, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
     Params("live config, prorata + price priority", **_Q, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, price_priority=True),
@@ -1259,8 +1292,10 @@ def main() -> None:
     ap.add_argument("--queue", action="store_true", help="queue model (prorata vs FIFO) and latency under FIFO (AWS tape)")
     ap.add_argument("--priority", action="store_true", help="price-priority fills from multi-level sweeps (AWS tape)")
     ap.add_argument("--eval", action="store_true", help="post-audit evaluation set under the corrected model (AWS tape)")
+    ap.add_argument("--eval2", action="store_true", help="neighbourhood of the EVAL winner (A3)")
+    ap.add_argument("--eval3", action="store_true", help="depth-gate threshold sweep")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
