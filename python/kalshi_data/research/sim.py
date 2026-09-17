@@ -118,6 +118,7 @@ class Order:
 class MarketPnL:
     ticker: str
     fills: int = 0
+    sweep_fills: int = 0   # fills received by price priority (a trade went through our level)
     bought: int = 0    # qty units
     sold: int = 0
     cash: float = 0.0  # dollars
@@ -305,6 +306,7 @@ class Quoter:
         if self.p.price_priority and o is not None and o.ahead is not None and self._live(o, rx) and o.price > price and o.remaining > 0:
             # the taker traded through our level: by price priority our order fills before anything at the worse price
             self.vetoes["priority_fills"] += 1
+            self.m(tk).sweep_fills += 1
             o.ahead = 0
             self._fill(tk, o, qty, rx)
             return
@@ -1305,8 +1307,9 @@ def main() -> None:
     ap.add_argument("--eval2", action="store_true", help="neighbourhood of the EVAL winner (A3)")
     ap.add_argument("--eval3", action="store_true", help="depth-gate threshold sweep")
     ap.add_argument("--eval4", action="store_true", help="depth gate under the pessimistic (no advancement) queue")
+    ap.add_argument("--baseline", action="store_true", help="the live/paper configuration only (for paper_vs_sim)")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else EVAL[:1] if a.baseline else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
@@ -1336,7 +1339,7 @@ def main() -> None:
         a.out.write_text(text)
     if a.per_market:
         rows = [{"config": r["name"], "ticker": m.ticker, "stop_rx": m.stop_rx, "pnl": m.mark_pnl, "spread": m.spread_capture,
-                 "inventory": m.inventory_pnl, "fills": m.fills, "traded": (m.bought + m.sold) / QTY, "market_volume": m.market_volume / QTY,
+                 "inventory": m.inventory_pnl, "fills": m.fills, "sweep_fills": m.sweep_fills, "traded": (m.bought + m.sold) / QTY, "market_volume": m.market_volume / QTY,
                  "max_abs_pos": m.max_abs_pos / QTY}
                 for r in res for m in r["per_market"] if m.mark_pnl is not None]
         pl.DataFrame(rows).write_parquet(a.per_market)

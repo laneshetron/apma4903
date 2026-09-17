@@ -72,7 +72,7 @@ def main() -> None:
     sim = pl.read_parquet(a.permkt).filter(pl.col("config") == a.config)
     simd = {r["ticker"]: r for r in sim.to_dicts()}
     print(f"# {a.mode} vs sim [{a.config}], {a.day} from {a.from_} UTC\n")
-    print("| market | ours $ | sim $ | ours fills | sim fills | ours contracts | sim contracts | sweep fills % |\n|---|---|---|---|---|---|---|---|")
+    print("| market | ours $ | sim $ | ours fills | sim fills | ours contracts | sim contracts | sweep fills % ours / sim |\n|---|---|---|---|---|---|---|---|")
     tot = collections.Counter()
     pairs = []
     for tk in sorted(ours):
@@ -85,11 +85,12 @@ def main() -> None:
                 continue
             pnl = m["cash"] + m["pos"] * mid / 100
         s = simd.get(tk)
-        if s is None:
-            continue
+        if s is None or m["fills"] == 0:
+            continue  # not simulated, or the quoter was not running (or halted) for this market
         pairs.append((pnl, s["pnl"]))
-        sw = f"{m['sweep'] / m['fills'] * 100:.0f}%" if m["fills"] else "—"
-        print(f"| {tk[-7:]} | {pnl:+.2f} | {s['pnl']:+.2f} | {m['fills']} | {s['fills']} | {m['contracts']:,.0f} | {s['traded']:,.0f} | {sw} |")
+        sw = f"{m['sweep'] / m['fills'] * 100:.0f}%"
+        ssw = f"{s['sweep_fills'] / s['fills'] * 100:.0f}%" if s.get("sweep_fills") is not None and s["fills"] else "—"
+        print(f"| {tk[-7:]} | {pnl:+.2f} | {s['pnl']:+.2f} | {m['fills']} | {s['fills']} | {m['contracts']:,.0f} | {s['traded']:,.0f} | {sw} / {ssw} |")
         tot.update(ours_pnl=pnl, sim_pnl=s["pnl"], ours_fills=m["fills"], sim_fills=s["fills"], ours_c=m["contracts"], sim_c=s["traded"])
     if pairs:
         df = pl.DataFrame(pairs, schema=["ours", "sim"], orient="row")

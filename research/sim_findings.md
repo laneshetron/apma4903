@@ -454,3 +454,18 @@ Next: neighbourhood of A3 (`--eval2`: depth 200/300/500 alone, age 0.5/1/2 s, + 
 Under the pessimistic queue the depth gate is ~zero: joining behind 1,000 contracts only pays if the queue in front of us actually drains. So the whole edge rests on the queue-advancement model, which has never been measured directly. The indirect evidence points the right way: live orders (994, 09-17 04:13–04:45) filled **48%** of the time with time-to-first-fill p50 0.71 s, vs 33% / 0.85 s for the sim's pro-rata model and 16% / 0.60 s pessimistic on the same day under the corrected model — live advances at least as fast as pro-rata, so pessimistic is a floor and pro-rata is not optimistic. But the depth-gated configs are precisely the ones that sit deep in the queue, where the model matters most, and 48% was measured for a chasing quoter that mostly sat at thin, fresh levels.
 
 Decision: the depth gate is the candidate rule, and the queue-advancement rate at thick levels is the number to measure next — from the paper quoter running `-min-depth 1000` (its fill rate vs the sim's on the same markets) and, in a bounded live test, from `GET /portfolio/orders/{id}/queue_position` polled on every resting order. Pro-rata at +2.6/market and pessimistic at +0.4 bracket the truth; live at size 5–20 with the gate cannot lose much either way (worst market −$5 at size 20).
+
+## 2026-09-17 — paper executor vs the corrected sim (`paper_vs_sim.py`)
+
+Paper (price priority + tapered tick, live config size 20 / cap 20 / $100) restarted 07:15 UTC; Kalshi's maintenance window left no markets until 09:00 UTC, and a halt at 10:08 (below) stopped it after five markets. On those five, against the sim's baseline on the same tape:
+
+| | paper | sim |
+|---|---|---|
+| P&L, 5 markets | −$24.0 | −$32.1 |
+| fills | 1,101 | 1,163 |
+| contracts | 10,269 | 10,194 |
+| sweep (price-priority) fills | 18–24% | 12–20% |
+
+Per market within a few dollars of each other (corr 0.40 on n = 5). The paper executor now reproduces the corrected sim's volume, sweep share and loss; the old paper on the same day had traded 4x the sim's volume at +$289 where the sim said −$38. Both are still losing at the live baseline configuration — as the sim says they should.
+
+**Bug found by the corrected paper (would have hit live):** halt `position 28.10 beyond limit`. Sequence: YES 20 pending-cancel; a trade that beat the cancel at the engine fills it (reported after the cancel ack); the strategy, seeing the stale position, places a new YES 20 which is swept 8 ms later → +28.1 vs cap 20. Live has the same race: Kalshi's cancel response carries `reduced_by`, and the fill channel reports the pre-cancel fill ~7 ms later. Fix (`8b3654d`): `Cancel` returns `reduced_by`; a cancelled order whose remainder exceeds `reduced_by` stays pending-cancel until those fills land, so the side cannot be re-quoted on a stale position; the paper executor waits out `FeedLag` before answering a cancel so its `reduced_by` is honest.
