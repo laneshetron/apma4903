@@ -105,24 +105,38 @@ func (p *PaperExecutor) Place(ctx context.Context, ticker string, side book.Side
 	return id, o.liveAt, nil
 }
 
-// Cancel removes the order after CancelLatency.
-func (p *PaperExecutor) Cancel(ctx context.Context, _ string, orderID string) (time.Time, error) {
+// Cancel removes the order after CancelLatency. Trades that beat the cancel at
+// the engine reach the public feed up to FeedLag later, so the response waits
+// out that window and reports, like the exchange's reduced_by, only what was
+// actually removed.
+func (p *PaperExecutor) Cancel(ctx context.Context, _ string, orderID string) (time.Time, book.Qty, error) {
 	select {
 	case <-time.After(p.CancelLatency):
 	case <-ctx.Done():
-		return time.Time{}, ctx.Err()
+		return time.Time{}, 0, ctx.Err()
+	}
+	p.mu.Lock()
+	o, ok := p.orders[orderID]
+	if !ok || !o.cancelAt.IsZero() {
+		p.mu.Unlock()
+		return time.Time{}, 0, ErrOrderDone
+	}
+	o.cancelAt = time.Now()
+	p.mu.Unlock()
+	if p.FeedLag > 0 {
+		select {
+		case <-time.After(p.FeedLag):
+		case <-ctx.Done():
+			return time.Time{}, 0, ctx.Err()
+		}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	o, ok := p.orders[orderID]
-	if !ok || !o.cancelAt.IsZero() {
-		return time.Time{}, ErrOrderDone
-	}
-	o.cancelAt = time.Now()
+	reduced := o.qty // whatever a pre-cancel trade did not take
 	if p.FeedLag == 0 {
 		delete(p.orders, orderID)
 	}
-	return o.cancelAt, nil
+	return o.cancelAt, reduced, nil
 }
 
 // Take fills immediately at price (the touch is assumed deep enough) and charges the taker fee.

@@ -19,9 +19,11 @@ type fakeExec struct {
 	rejectAll bool
 	block     chan struct{} // if set, Place blocks until closed
 	nextID    int
+	qty       book.Qty // last placed quantity, for reduced_by
+	inFlight  book.Qty // quantity a cancel reports as filled-before-cancel (fills still in flight)
 }
 
-func (f *fakeExec) Place(_ context.Context, _ string, _ book.Side, _ book.Price, _ book.Qty, clientID string) (string, time.Time, error) {
+func (f *fakeExec) Place(_ context.Context, _ string, _ book.Side, _ book.Price, qty book.Qty, clientID string) (string, time.Time, error) {
 	if f.block != nil {
 		<-f.block
 	}
@@ -33,6 +35,7 @@ func (f *fakeExec) Place(_ context.Context, _ string, _ book.Side, _ book.Price,
 	f.nextID++
 	id := "ord-" + strings.TrimPrefix(clientID, "c-")
 	f.placed = append(f.placed, id)
+	f.qty = qty
 	return id, time.Now(), nil
 }
 
@@ -45,11 +48,41 @@ func (f *fakeExec) Take(_ context.Context, _ string, _ book.Side, _ book.Price, 
 	return id, time.Now(), nil
 }
 
-func (f *fakeExec) Cancel(_ context.Context, _ string, orderID string) (time.Time, error) {
+func (f *fakeExec) Cancel(_ context.Context, _ string, orderID string) (time.Time, book.Qty, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.canceled = append(f.canceled, orderID)
-	return time.Now(), nil
+	return time.Now(), f.qty - f.inFlight, nil
+}
+
+// A cancel whose response says part of the order was filled first keeps the
+// side held until that fill arrives, then finishes the order as canceled.
+func TestLedgerCancelWaitsForInFlightFills(t *testing.T) {
+	ex := &fakeExec{inFlight: 4000}
+	var events []string
+	l := NewLedger("M", func(k string, _ map[string]any) { events = append(events, k) })
+	ctx := context.Background()
+	if err := l.Place(ctx, ex, book.Yes, 5000, 10000, "c-1", "join", t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Cancel(ctx, ex, book.Yes, "reprice"); err != nil {
+		t.Fatal(err)
+	}
+	views, _ := l.Views()
+	v := views[book.Yes]
+	if v == nil || v.State != PendingCancel {
+		t.Fatalf("side should stay pending-cancel while fills are in flight, got %+v", v)
+	}
+	l.OnFill("f1", Fill{Ticker: "M", OrderID: "ord-1", Side: book.Yes, Price: 5000, Qty: 4000})
+	if views, _ := l.Views(); views[book.Yes] != nil {
+		t.Fatalf("side should be free once the in-flight fill landed, got %+v", views[book.Yes])
+	}
+	if pos, _ := l.Position(); pos != 4000 {
+		t.Fatalf("pos = %v, want 40", pos)
+	}
+	if strings.Join(events, ",") != "place,place_ack,cancel,cancel_ack,fills_in_flight,done,fill" {
+		t.Fatalf("events: %v", events)
+	}
 }
 
 func TestLedgerPlaceCancelLifecycle(t *testing.T) {
@@ -170,8 +203,8 @@ func TestLedgerOrderUpdatesFromStream(t *testing.T) {
 
 type doneExec struct{ fakeExec }
 
-func (d *doneExec) Cancel(context.Context, string, string) (time.Time, error) {
-	return time.Time{}, ErrOrderDone
+func (d *doneExec) Cancel(context.Context, string, string) (time.Time, book.Qty, error) {
+	return time.Time{}, 0, ErrOrderDone
 }
 
 func TestLedgerCancelOfFinishedOrderFreesSide(t *testing.T) {

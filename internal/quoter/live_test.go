@@ -147,10 +147,10 @@ func TestLiveExecutorRejectionsAndCancelSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ex.Cancel(ctx, "M", id); err != nil {
-		t.Fatal(err)
+	if _, reduced, err := ex.Cancel(ctx, "M", id); err != nil || reduced != 500 {
+		t.Fatalf("cancel: reduced_by %v err %v", reduced, err)
 	}
-	if _, err := ex.Cancel(ctx, "M", id); !errors.Is(err, ErrOrderDone) {
+	if _, _, err := ex.Cancel(ctx, "M", id); !errors.Is(err, ErrOrderDone) {
 		t.Fatalf("second cancel (404) must be ErrOrderDone, got %v", err)
 	}
 	// the token bucket refuses before the request goes out

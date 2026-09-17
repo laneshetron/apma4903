@@ -90,22 +90,26 @@ func (e *LiveExecutor) Take(ctx context.Context, ticker string, side book.Side, 
 }
 
 // Cancel cancels orderID on the executor's shard.
-func (e *LiveExecutor) Cancel(ctx context.Context, _ string, orderID string) (time.Time, error) {
+func (e *LiveExecutor) Cancel(ctx context.Context, _ string, orderID string) (time.Time, book.Qty, error) {
 	if e.bucket != nil && !e.bucket.Take(CostCancel) {
-		return time.Time{}, fmt.Errorf("rate limit: no write tokens for a cancel")
+		return time.Time{}, 0, fmt.Errorf("rate limit: no write tokens for a cancel")
 	}
 	ex := gen.ExchangeIndex(e.shard)
 	resp, err := e.cl.CancelOrderV2WithResponse(ctx, orderID, &gen.CancelOrderV2Params{ExchangeIndex: &ex})
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, 0, err
 	}
 	if resp.JSON200 == nil {
 		if resp.StatusCode() == http.StatusNotFound {
-			return time.Time{}, ErrOrderDone // already filled or cancelled
+			return time.Time{}, 0, ErrOrderDone // already filled or cancelled
 		}
-		return time.Time{}, fmt.Errorf("cancel order: HTTP %d %s", resp.StatusCode(), truncate(resp.Body, 200))
+		return time.Time{}, 0, fmt.Errorf("cancel order: HTTP %d %s", resp.StatusCode(), truncate(resp.Body, 200))
 	}
-	return time.UnixMilli(resp.JSON200.TsMs), nil
+	reduced, err := book.ParseQty(string(resp.JSON200.ReducedBy))
+	if err != nil {
+		return time.Time{}, 0, fmt.Errorf("cancel order: reduced_by %q: %w", resp.JSON200.ReducedBy, err)
+	}
+	return time.UnixMilli(resp.JSON200.TsMs), reduced, nil
 }
 
 // Recover cancels any resting orders on ticker left by a previous process and
@@ -121,7 +125,7 @@ func (e *LiveExecutor) Recover(ctx context.Context, ticker string) (book.Qty, er
 		return 0, fmt.Errorf("list orders: HTTP %d", orders.StatusCode())
 	}
 	for _, o := range orders.JSON200.Orders {
-		if _, err := e.Cancel(ctx, ticker, o.OrderId); err != nil && err != ErrOrderDone {
+		if _, _, err := e.Cancel(ctx, ticker, o.OrderId); err != nil && err != ErrOrderDone {
 			return 0, fmt.Errorf("cancel stray order %s: %w", o.OrderId, err)
 		}
 	}

@@ -155,14 +155,14 @@ func TestPaperTradeExplainsDelta(t *testing.T) {
 func TestPaperCancelRemovesOrder(t *testing.T) {
 	p, fills, id := paperSetup(t, 0)
 	now := time.Now()
-	if _, err := p.Cancel(context.Background(), "M", id); err != nil {
+	if _, _, err := p.Cancel(context.Background(), "M", id); err != nil {
 		t.Fatal(err)
 	}
 	p.OnTrade(now, "M", 5000, 100*100, "no", 1)
 	if len(*fills) != 0 {
 		t.Fatal("canceled order must not fill")
 	}
-	if _, err := p.Cancel(context.Background(), "M", id); !errors.Is(err, ErrOrderDone) {
+	if _, _, err := p.Cancel(context.Background(), "M", id); !errors.Is(err, ErrOrderDone) {
 		t.Fatalf("double cancel should report ErrOrderDone, got %v", err)
 	}
 }
@@ -176,7 +176,7 @@ func TestPaperLatencyIsHonoured(t *testing.T) {
 		t.Fatalf("place returned after %v, want >= 30ms", d)
 	}
 	start = time.Now()
-	_, _ = p.Cancel(context.Background(), "M", id)
+	_, _, _ = p.Cancel(context.Background(), "M", id)
 	if d := time.Since(start); d < 10*time.Millisecond {
 		t.Fatalf("cancel returned after %v, want >= 10ms", d)
 	}
@@ -221,7 +221,7 @@ func TestPaperFeedLagOrdersAheadAndTradesBeforeCancel(t *testing.T) {
 	}
 	// cancel: a trade seen 4ms after the cancel took effect happened 3ms before it -> still fills us
 	time.Sleep(20 * time.Millisecond) // so the cancel is clearly after we went live
-	cancelAt, _ := p.Cancel(context.Background(), "M", id)
+	cancelAt, _, _ := p.Cancel(context.Background(), "M", id)
 	p.OnTrade(cancelAt.Add(4*time.Millisecond), "M", 5000, 160*100, "no", 4)
 	if len(fills) != 1 || fills[0].Qty != 10*100 {
 		t.Fatalf("trade from before the cancel should fill 10, got %v", fills)

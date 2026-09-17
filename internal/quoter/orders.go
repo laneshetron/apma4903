@@ -15,8 +15,11 @@ type Executor interface {
 	// Place submits a resting bid on side at price for qty and returns the
 	// exchange order id. clientID is the idempotency key.
 	Place(ctx context.Context, ticker string, side book.Side, price book.Price, qty book.Qty, clientID string) (orderID string, engineTs time.Time, err error)
-	// Cancel cancels orderID (market ticker given for routing).
-	Cancel(ctx context.Context, ticker, orderID string) (engineTs time.Time, err error)
+	// Cancel cancels orderID (market ticker given for routing). reducedBy is
+	// the quantity the exchange actually removed; anything of the order's
+	// remainder beyond it was filled before the cancel and its fill reports are
+	// still in flight.
+	Cancel(ctx context.Context, ticker, orderID string) (engineTs time.Time, reducedBy book.Qty, err error)
 	// Take crosses the spread with an immediate-or-cancel order: side Yes buys
 	// YES at price (the ask), side No sells YES at price (the bid). Fills are
 	// reported through the normal fill path; the return is the accepted order.
@@ -32,6 +35,7 @@ type Order struct {
 	Price    book.Price
 	Qty      book.Qty // original
 	Filled   book.Qty
+	FilledBy book.Qty // after a cancel: the quantity the exchange reports as filled (fills may still be in flight)
 	State    OrderState
 	Placed   time.Time
 	Acked    time.Time
@@ -231,7 +235,7 @@ func (l *Ledger) Cancel(ctx context.Context, ex Executor, side book.Side, reason
 	o.State = PendingCancel
 	l.mu.Unlock()
 	l.onEvent("cancel", map[string]any{"order_id": o.ID, "reason": reason})
-	engineTs, err := ex.Cancel(ctx, l.ticker, o.ID)
+	engineTs, reducedBy, err := ex.Cancel(ctx, l.ticker, o.ID)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if errors.Is(err, ErrOrderDone) {
@@ -245,7 +249,14 @@ func (l *Ledger) Cancel(ctx context.Context, ex Executor, side book.Side, reason
 		l.onEvent("cancel_error", map[string]any{"order_id": o.ID, "err": err.Error()})
 		return err
 	}
-	l.onEvent("cancel_ack", map[string]any{"order_id": o.ID, "engine_ts": engineTs.UnixMilli()})
+	l.onEvent("cancel_ack", map[string]any{"order_id": o.ID, "engine_ts": engineTs.UnixMilli(), "reduced_by": reducedBy.String()})
+	// the part of the remainder the exchange did not remove was filled before the
+	// cancel; hold the side until those fills arrive so the position they create
+	// is known before anything else is quoted on it
+	if o.FilledBy = o.Qty - reducedBy; o.FilledBy > o.Filled {
+		l.onEvent("fills_in_flight", map[string]any{"order_id": o.ID, "qty": (o.FilledBy - o.Filled).String()})
+		return nil
+	}
 	l.finishLocked(o, "canceled")
 	return nil
 }
@@ -314,6 +325,8 @@ func (l *Ledger) OnFill(fillID string, f Fill) {
 		o.Filled += f.Qty
 		if o.Filled >= o.Qty {
 			l.finishLocked(o, "filled")
+		} else if o.State == PendingCancel && o.FilledBy > 0 && o.Filled >= o.FilledBy {
+			l.finishLocked(o, "canceled") // the in-flight fills have landed
 		}
 	}
 	// a YES bid fill is +qty YES at price; a NO bid fill is -qty YES at (1 - price)
