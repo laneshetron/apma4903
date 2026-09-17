@@ -255,8 +255,9 @@ func (e *Engine) sessionPnL(l *Ledger, mid book.Price) float64 {
 		} else if pos < 0 {
 			posValue = float64(-pos) / 100 * float64(book.OneDollar-mid) / float64(book.OneDollar)
 		}
-		// cash spent on the open position is already out of the balance; add back what it is worth
-		return e.available - e.fillCostSincePoll - e.startBalance + posValue
+		// equity = exchange balance (cost of the open position already out, settlements in) + open position at mid.
+		// Deliberately no between-poll adjustments: those are estimates, and a stop must not fire on estimates.
+		return e.available - e.startBalance + posValue
 	}
 	return e.closedPnL + l.MarkPnL(mid)
 }
