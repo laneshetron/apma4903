@@ -42,6 +42,10 @@ type EngineConfig struct {
 	Logger   *slog.Logger
 	// PickMarket returns the market to quote now (nil = none open).
 	PickMarket func(ctx context.Context) (*Market, error)
+	// Balance, if set, returns the free collateral on the trading shard ($); polled every few seconds.
+	Balance func(ctx context.Context) (float64, error)
+	// Capital, when Balance is nil, is a fixed budget (paper mode); <0 = unlimited.
+	Capital float64
 }
 
 // Engine runs the strategy on one market at a time.
@@ -61,11 +65,13 @@ type Engine struct {
 	inflight   map[book.Side]bool   // a place is being sent
 	wantCancel map[book.Side]string // cancel requested while the place was unacknowledged
 	lastBookRx time.Time
+	available  float64   // free collateral ($), -1 = unknown/unlimited
 	started    time.Time // engine start, or the last market roll
 	seqGap     bool
 	halted     string
 	paused     string
 	stats      Stats
+	vetoes     map[string]int // snapshot of the strategy's veto counters (the strategy is owned by the loop goroutine)
 }
 
 // Stats is the status-endpoint summary.
@@ -78,6 +84,7 @@ type Stats struct {
 	Cash       float64        `json:"cash_$"`
 	MarkPnL    float64        `json:"mark_pnl_$"`
 	Fills      int            `json:"fills"`
+	Available  float64        `json:"available_$"`
 	Placed     int            `json:"placed"`
 	Canceled   int            `json:"canceled"`
 	Errors     int            `json:"errors"`
@@ -96,7 +103,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 	return &Engine{
 		cfg: cfg, log: cfg.Logger, strat: NewStrategy(cfg.Params), risk: NewRisk(cfg.Limits), spot: &SpotState{},
 		events: make(chan feed.Event, 8192), quotes: make(chan CoinbaseQuote, 1024),
-		inflight: map[book.Side]bool{}, wantCancel: map[book.Side]string{},
+		inflight: map[book.Side]bool{}, wantCancel: map[book.Side]string{}, available: -1,
 	}
 }
 
@@ -162,8 +169,14 @@ func (e *Engine) Run(ctx context.Context) error {
 	defer roll.Stop()
 	e.mu.Lock()
 	e.started = time.Now()
+	if e.cfg.Balance == nil {
+		e.available = e.cfg.Capital
+	}
 	e.mu.Unlock()
 	e.rollMarket(ctx)
+	e.refreshBalance(ctx)
+	bal := time.NewTicker(5 * time.Second)
+	defer bal.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -177,8 +190,48 @@ func (e *Engine) Run(ctx context.Context) error {
 			e.onTick(ctx, now)
 		case <-roll.C:
 			e.rollMarket(ctx)
+		case <-bal.C:
+			e.refreshBalance(ctx)
 		}
 	}
+}
+
+// refreshBalance polls the exchange for free collateral (live mode).
+func (e *Engine) refreshBalance(ctx context.Context) {
+	if e.cfg.Balance == nil {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	b, err := e.cfg.Balance(cctx)
+	if err != nil {
+		e.log.Warn("balance", "err", err)
+		return
+	}
+	e.mu.Lock()
+	e.available = b
+	e.stats.Available = b
+	e.mu.Unlock()
+}
+
+// freeCollateral is the exchange balance less what our working orders reserve since the last poll,
+// and in paper mode the fixed budget less all reservations and the position's cost.
+func (e *Engine) freeCollateral(l *Ledger) float64 {
+	e.mu.Lock()
+	avail := e.available
+	e.mu.Unlock()
+	if avail < 0 {
+		return -1
+	}
+	reserved := 0.0
+	for _, o := range l.WorkingOrders() {
+		reserved += Collateral(o.Price, o.Qty-o.Filled)
+	}
+	if e.cfg.Balance == nil {
+		_, cash := l.Position()
+		avail += cash // paper: cash spent on the position is no longer free
+	}
+	return avail - reserved
 }
 
 func (e *Engine) shutdown() {
@@ -428,10 +481,19 @@ func (e *Engine) decide(ctx context.Context, now time.Time) {
 		}
 	}
 	e.mu.Unlock()
-	in := Inputs{Now: now, Book: bv.Book, Stale: bv.Stale, Pos: pos, Orders: views, CloseAt: m.CloseAt, Strike: m.Strike, Spot: e.spot, Edge: e.cfg.Edge}
+	in := Inputs{Now: now, Book: bv.Book, Stale: bv.Stale, Pos: pos, Orders: views, CloseAt: m.CloseAt, Strike: m.Strike, Spot: e.spot, Edge: e.cfg.Edge,
+		Available: e.freeCollateral(l)}
 	for _, a := range e.strat.Decide(in) {
 		e.execute(ctx, l, a, now)
 	}
+	e.mu.Lock()
+	if e.vetoes == nil || len(e.vetoes) != len(e.strat.Vetoes) {
+		e.vetoes = map[string]int{}
+	}
+	for k, v := range e.strat.Vetoes {
+		e.vetoes[k] = v
+	}
+	e.mu.Unlock()
 }
 
 // execute carries out one action without blocking the event loop.
@@ -518,7 +580,7 @@ func (e *Engine) Stats() Stats {
 	s.Halted = e.risk.Halted()
 	s.Paused = e.paused
 	s.Vetoes = map[string]int{}
-	for k, v := range e.strat.Vetoes {
+	for k, v := range e.vetoes {
 		s.Vetoes[k] = v
 	}
 	s.Working = map[string]any{}

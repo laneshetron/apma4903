@@ -49,6 +49,28 @@ type OrderView struct {
 	State OrderState
 }
 
+// Collateral is the dollars Kalshi reserves for a resting bid: price x contracts.
+func Collateral(price book.Price, qty book.Qty) float64 {
+	return float64(price) / float64(book.OneDollar) * float64(qty) / 100
+}
+
+// AffordableQty is the largest whole-contract quantity <= want whose collateral fits in available.
+func AffordableQty(want book.Qty, price book.Price, available float64) book.Qty {
+	if available < 0 {
+		return want
+	}
+	per := float64(price) / float64(book.OneDollar)
+	if per <= 0 {
+		return 0
+	}
+	n := int64(available / per) // whole contracts
+	q := book.Qty(n * 100)
+	if q > want {
+		return want
+	}
+	return q
+}
+
 // Inputs is the market and account state at a decision point.
 type Inputs struct {
 	Now     time.Time
@@ -60,6 +82,8 @@ type Inputs struct {
 	Strike  float64
 	Spot    *SpotState
 	Edge    *EdgeModel
+	// Available is the collateral ($) free for new orders; a negative value means unknown (no sizing).
+	Available float64
 }
 
 // ActionKind is Place or Cancel.
@@ -179,6 +203,21 @@ func (s *Strategy) Decide(in Inputs) []Action {
 		}
 	}
 
+	// capital: split what is free evenly across the sides that need a new order
+	budget := in.Available
+	if budget >= 0 {
+		n := 0
+		for _, side := range []book.Side{book.Yes, book.No} {
+			o := in.Orders[side]
+			working := o != nil && (o.State == Resting || o.State == PendingNew) && allow[side] && o.Price == want[side]
+			if allow[side] && !working {
+				n++
+			}
+		}
+		if n > 1 {
+			budget /= float64(n)
+		}
+	}
 	for _, side := range []book.Side{book.Yes, book.No} {
 		o := in.Orders[side]
 		working := o != nil && (o.State == Resting || o.State == PendingNew)
@@ -213,7 +252,12 @@ func (s *Strategy) Decide(in Inputs) []Action {
 		if improve {
 			reason = "improve"
 		}
-		out = append(out, Action{Kind: Place, Side: side, Price: want[side], Qty: s.P.Size, Reason: reason})
+		qty := AffordableQty(s.P.Size, want[side], budget)
+		if qty < 100 {
+			s.Vetoes["capital"]++
+			continue
+		}
+		out = append(out, Action{Kind: Place, Side: side, Price: want[side], Qty: qty, Reason: reason})
 	}
 	return out
 }

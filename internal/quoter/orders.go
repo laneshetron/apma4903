@@ -102,6 +102,17 @@ func (l *Ledger) byOrderID(id string) *Order {
 	return l.byID[id]
 }
 
+// WorkingOrders returns copies of the working orders.
+func (l *Ledger) WorkingOrders() []Order {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]Order, 0, len(l.working))
+	for _, o := range l.working {
+		out = append(out, *o)
+	}
+	return out
+}
+
 // Working returns the working order on side, if any.
 func (l *Ledger) Working(side book.Side) *Order {
 	l.mu.Lock()

@@ -71,7 +71,7 @@ func newTestEngine(t *testing.T, src *fakeSource, mkt *Market, limits Limits) (*
 	cur := mkt
 	eng = NewEngine(EngineConfig{
 		Params: Params{Size: 100 * 100, MaxPos: 200 * 100, StopBefore: 5 * time.Minute, SignalMove: 2},
-		Limits: limits, Mode: "paper", Exec: paper, Paper: paper, Feed: src,
+		Limits: limits, Mode: "paper", Exec: paper, Paper: paper, Feed: src, Capital: -1,
 		PickMarket: func(context.Context) (*Market, error) { mu.Lock(); defer mu.Unlock(); return cur, nil },
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -197,7 +197,7 @@ func TestEngineRollsMarketAndCancelsOld(t *testing.T) {
 	paper := NewPaperExecutor(0, 0, func(tk string) (*book.Book, bool) { bv, ok := src.Book(tk); return bv.Book, ok }, func(id string, f Fill) { eng.PaperFill(id, f) })
 	lim := testLimits()
 	eng = NewEngine(EngineConfig{
-		Params: Params{Size: 100 * 100, MaxPos: 200 * 100, StopBefore: 5 * time.Minute}, Limits: lim, Mode: "paper", Exec: paper, Paper: paper, Feed: src,
+		Params: Params{Size: 100 * 100, MaxPos: 200 * 100, StopBefore: 5 * time.Minute}, Limits: lim, Mode: "paper", Exec: paper, Paper: paper, Feed: src, Capital: -1,
 		PickMarket: func(context.Context) (*Market, error) { mu.Lock(); defer mu.Unlock(); return cur, nil },
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -247,4 +247,26 @@ func TestEngineSignalCancelsStaleSide(t *testing.T) {
 	waitFor(t, "quotes", func() bool { return len(eng.Stats().Working) == 2 })
 	eng.Quotes() <- CoinbaseQuote{Rx: now, Bid: 76005, Ask: 76006, BidSz: 1, AskSz: 1} // +$5: our NO bid (YES ask) is stale
 	waitFor(t, "NO side pulled", func() bool { w := eng.Stats().Working; return w["no"] == nil && w["yes"] != nil })
+}
+
+func TestEngineSizesToPaperCapital(t *testing.T) {
+	tk := "KXBTC15M-TEST"
+	src := &fakeSource{books: map[string]*book.Book{tk: mkBook(5000, 300*100, 4900, 300*100)}}
+	var eng *Engine
+	paper := NewPaperExecutor(0, 0, func(tk string) (*book.Book, bool) { bv, ok := src.Book(tk); return bv.Book, ok }, func(id string, f Fill) { eng.PaperFill(id, f) })
+	eng = NewEngine(EngineConfig{
+		Params: Params{Size: 100 * 100, MaxPos: 200 * 100, StopBefore: 5 * time.Minute}, Limits: testLimits(), Mode: "paper", Exec: paper, Paper: paper, Feed: src,
+		Capital: 5.0, // $5: $2.50 per side -> 5 YES at 50c, 5 NO at 49c
+		PickMarket: func(context.Context) (*Market, error) {
+			return &Market{Ticker: tk, Strike: 76000, CloseAt: time.Now().Add(10 * time.Minute)}, nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = eng.Run(ctx) }()
+	eng.OnFeedEvent(delta(tk, book.Yes, 5000, 100, 1))
+	waitFor(t, "sized quotes", func() bool {
+		w := eng.Stats().Working
+		return len(w) == 2 && w["yes"].(map[string]any)["qty"] == "5.00" && w["no"].(map[string]any)["qty"] == "5.00"
+	})
 }

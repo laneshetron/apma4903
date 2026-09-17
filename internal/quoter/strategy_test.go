@@ -21,12 +21,13 @@ func mkBook(yesPx, yesQty, noPx, noQty int) *book.Book {
 func base() (Params, Inputs) {
 	p := Params{Size: 100 * 100, MaxPos: 200 * 100, StopBefore: 5 * time.Minute, SignalMove: 2}
 	in := Inputs{
-		Now:     t0,
-		Book:    mkBook(5000, 300000, 4900, 250000), // 50c bid, 51c ask (NO bid at 49c), 1c spread
-		Orders:  map[book.Side]*OrderView{},
-		CloseAt: t0.Add(10 * time.Minute),
-		Strike:  76000,
-		Spot:    &SpotState{},
+		Now:       t0,
+		Book:      mkBook(5000, 300000, 4900, 250000), // 50c bid, 51c ask (NO bid at 49c), 1c spread
+		Orders:    map[book.Side]*OrderView{},
+		CloseAt:   t0.Add(10 * time.Minute),
+		Strike:    76000,
+		Spot:      &SpotState{},
+		Available: -1, // unknown: no capital sizing
 	}
 	return p, in
 }
@@ -283,5 +284,35 @@ func TestPriceBounds(t *testing.T) {
 	as = NewStrategy(p).Decide(in)
 	if len(as) != 2 {
 		t.Errorf("expected joins at the bounds, got %v", as)
+	}
+}
+
+func TestCapitalSizing(t *testing.T) {
+	if q := AffordableQty(100*100, 5000, 4.0); q != 8*100 { // $4 at 50c = 8 contracts
+		t.Fatalf("affordable = %v, want 8.00", q)
+	}
+	if q := AffordableQty(100*100, 5000, 1000); q != 100*100 {
+		t.Fatalf("plenty of capital should return the wanted size, got %v", q)
+	}
+	if q := AffordableQty(100*100, 5000, 0.3); q != 0 {
+		t.Fatalf("less than one contract's collateral should return 0, got %v", q)
+	}
+	p, in := base()
+	in.Available = 5.0 // $5 split across both sides: $2.50 each -> 5 YES at 50c, 5 NO at 49c
+	as := NewStrategy(p).Decide(in)
+	if len(as) != 2 || as[0].Qty != 5*100 || as[1].Qty != 5*100 {
+		t.Fatalf("with $5 want 5 + 5, got %v", as)
+	}
+	// with YES already resting at the touch, all the free capital goes to the NO side
+	in.Orders[book.Yes] = &OrderView{ID: "y", Side: book.Yes, Price: 5000, Qty: 500, State: Resting}
+	as = NewStrategy(p).Decide(in)
+	if len(as) != 1 || as[0].Side != book.No || as[0].Qty != 10*100 {
+		t.Fatalf("with YES resting, $5 should buy 10 NO at 49c, got %v", as)
+	}
+	delete(in.Orders, book.Yes)
+	in.Available = 0.2
+	s := NewStrategy(p)
+	if as := s.Decide(in); len(as) != 0 || s.Vetoes["capital"] == 0 {
+		t.Fatalf("no capital: no orders, got %v", as)
 	}
 }

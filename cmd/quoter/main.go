@@ -27,6 +27,7 @@ import (
 	"github.com/laneshetron/kalshi/internal/config"
 	"github.com/laneshetron/kalshi/internal/feed"
 	"github.com/laneshetron/kalshi/internal/kalshi"
+	"github.com/laneshetron/kalshi/internal/kalshi/gen"
 	"github.com/laneshetron/kalshi/internal/quoter"
 	"github.com/laneshetron/kalshi/internal/recorder"
 )
@@ -55,6 +56,7 @@ func run() error {
 	placeLat := flag.Duration("paper-place-latency", 9*time.Millisecond, "paper: simulated place latency")
 	cancelLat := flag.Duration("paper-cancel-latency", 5*time.Millisecond, "paper: simulated cancel latency")
 	feedLag := flag.Duration("paper-feed-lag", 7*time.Millisecond, "paper: engine -> public feed delay (orders seen within it were ahead of us)")
+	paperCapital := flag.Float64("paper-capital", -1, "paper: fixed collateral budget ($); <0 = unlimited")
 	statusAddr := flag.String("status", "127.0.0.1:8082", "status HTTP address")
 	flag.Parse()
 
@@ -151,9 +153,25 @@ func run() error {
 		return best, nil
 	}
 
+	var balance func(context.Context) (float64, error)
+	if *mode == "live" {
+		balance = func(ctx context.Context) (float64, error) {
+			ex := gen.ExchangeIndex(*shard)
+			resp, err := rest.Raw().GetBalanceWithResponse(ctx, &gen.GetBalanceParams{ExchangeIndex: &ex})
+			if err != nil {
+				return 0, err
+			}
+			if resp.JSON200 == nil {
+				return 0, fmt.Errorf("balance: HTTP %d", resp.StatusCode())
+			}
+			var v float64
+			_, err = fmt.Sscanf(resp.JSON200.BalanceDollars, "%g", &v)
+			return v, err
+		}
+	}
 	eng = quoter.NewEngine(quoter.EngineConfig{
 		Params: params, Limits: limits, Series: *series, Mode: *mode, Exec: exec, Paper: paper, Feed: fd,
-		Recorder: rec, Edge: edge, Logger: log, PickMarket: pick,
+		Recorder: rec, Edge: edge, Logger: log, PickMarket: pick, Balance: balance, Capital: *paperCapital,
 	})
 
 	go func() {
