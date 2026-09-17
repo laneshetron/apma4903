@@ -528,3 +528,28 @@ Components of the 15 ms (measured): Kalshi engine → our WS receipt 6–7 ms (K
 **Anticipating instead of reading** (`level_lead.py`, 09-16, 8,044 Coinbase moves ≥ $2/1 s): only 51% of moves produce a new, better touch on the favoured side within 2 s; when one forms, 13% form within 16 ms of our spot receipt, p50 308 ms, p75 844 ms. So a bid sent on the spot trigger would be first at the vacated level in ~87% of formations — *if* it could rest there. It can't: the ask it needs to replace is still occupied when the order arrives. Sim (`--sigimp`, 09-16, post-only at the old ask on the trigger, replacing the resting join, 15 ms tape latency): **85% of the 9,150 signal orders are rejected post-only-cross**, the rest rest as lone improves; P&L −2.31/market vs −0.42 baseline at every hold (0.5/2/5 s), threshold ($2/3/5), with or without the join gate, at FIX-like latency (−2.01), and at size 50 (−4.36). The rule gives up queue position on the good side for a ticket that mostly bounces; re-firing until accepted converges on the existing improve-on-vacate rule with a few ms shaved, which the sweep values at ≈ $0.5/market.
 
 Conclusion: option 1 is closed on KXBTC15M. The binding constraint is the 6 ms feed lag, which no order-entry work or Coinbase-triggered anticipation gets around; the +$3/market front-of-queue regime needs a way to see or predict the engine's events ~4 ms sooner than the public WS, which we do not have.
+
+## 2026-09-17 — is the next touch move predictable, and can that buy queue priority? (`vacate.py`)
+
+Target: per side of the active market, sampled every 100 ms, does the opposing touch vacate within H ms. 52 features (Kalshi top-two sizes both sides, touch ages, removals/trades at the opposing touch, spot returns 50 ms–5 s, Coinbase imbalance/microprice, signed flow on 9 venues, cross-venue gaps, BRTI, moneyness, vol). Walk-forward: trained on 09-16 (267k rows), tested on 09-17 (747k rows):
+
+| horizon | base rate | AUC | precision @ top 1% / 5% / 10% | recall @10% | lead p50 among hits |
+|---|---|---|---|---|---|
+| 50 ms | 2.5% | 0.894 | 38 / 24 / 17% | 67% | 18 ms |
+| 100 ms | 4.4% | 0.876 | 52 / 36 / 26% | 60% | 35 ms |
+| 250 ms | 9.2% | 0.836 | 69 / 54 / 43% | 47% | 76 ms |
+| 500 ms | 15.7% | 0.800 | 80 / 67 / 57% | 36% | 121 ms |
+| 1 s | 25.4% | 0.766 | 87 / 78 / 70% | 28% | 178 ms |
+
+The move is predictable — but by the state of the level, not by spot: `opp_size` alone has AUC 0.82 (the model 0.84); removals at the touch over 500 ms 0.68, level age 0.63; the best spot/perp feature is 0.57. It reads "the ask is thin, old and being eaten", not "the price is about to go up".
+
+**Why the prediction cannot be monetised as queue priority** (`/tmp/form_lag.py`, all touch vacates on the active market):
+
+| | 09-16 (23,109 vacates) | 09-17 (63,177) |
+|---|---|---|
+| a bid forms at the vacated price within 2 s | 67% | 67% |
+| formation lag p25 / p50 / p75 | 0 / 2 / 8 ms | 0 / 1 / 7 ms |
+| formed within 5 ms | 65% | 67% |
+| formed within 16 ms (our WS reaction) | 82% | 85% |
+
+A quarter of the new levels appear at the same tape timestamp as the vacate and half within 2 ms: the bid is placed by the party that pulled the ask, as one action (a maker rolling its quote). Nothing can be ahead of the actor who defines the event; a post-only cannot rest there beforehand (it crosses), and taking the ask on the prediction is a 1-tick trade against a 0.6–1.75¢ fee. The 15–18% of formations slower than 16 ms are the improves the existing rule already captures. This is the same fact as "the queue never drains" from the other side: the book is a few two-sided quoters rolling their quotes; a REST participant is either behind them or swept with them.
