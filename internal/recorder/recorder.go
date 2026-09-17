@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,7 +56,19 @@ type Recorder struct {
 	stop   chan struct{}
 	done   chan struct{}
 
+	// Write hands records to a background goroutine so gzip never runs on the
+	// caller (the feed reader or the trading loop); the channel is bounded so
+	// a stalled disk applies back-pressure instead of unbounded memory.
+	queue   chan record
+	wdone   chan struct{}
+	dropped atomic.Uint64
+
 	lines uint64
+}
+
+type record struct {
+	rx  time.Time
+	raw []byte
 }
 
 // Open creates a recorder rooted at dir and starts a periodic flusher.
@@ -63,9 +76,40 @@ func Open(dir string, flushEvery time.Duration) (*Recorder, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "raw"), 0o755); err != nil {
 		return nil, err
 	}
-	r := &Recorder{dir: dir, now: time.Now, rate: flushEvery, stop: make(chan struct{}), done: make(chan struct{})}
+	r := &Recorder{dir: dir, now: time.Now, rate: flushEvery, stop: make(chan struct{}), done: make(chan struct{}),
+		queue: make(chan record, 65536), wdone: make(chan struct{})}
 	go r.flushLoop()
+	go r.writeLoop()
 	return r, nil
+}
+
+// writeLoop drains the queue into the gzip stream.
+func (r *Recorder) writeLoop() {
+	defer close(r.wdone)
+	for rec := range r.queue {
+		r.mu.Lock()
+		err := r.writeLocked(rec.rx, rec.raw)
+		r.mu.Unlock()
+		if err != nil {
+			r.dropped.Add(1)
+		}
+	}
+}
+
+// Write queues one record. It never blocks on compression; if the queue is
+// full (disk stalled) it blocks briefly rather than dropping data.
+func (r *Recorder) Write(rx time.Time, raw []byte) error {
+	raw = bytes.TrimRight(raw, " \t\r\n")
+	cp := make([]byte, len(raw))
+	copy(cp, raw) // the caller may reuse its buffer
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		return fmt.Errorf("recorder: closed")
+	}
+	r.queue <- record{rx, cp}
+	return nil
 }
 
 func (r *Recorder) flushLoop() {
@@ -134,13 +178,7 @@ func (r *Recorder) closeFileLocked() error {
 
 // Write records one raw message received at rx. Trailing whitespace is
 // dropped (Kalshi frames end with a newline) so each record stays on one line.
-func (r *Recorder) Write(rx time.Time, raw []byte) error {
-	raw = bytes.TrimRight(raw, " \t\r\n")
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return fmt.Errorf("recorder: closed")
-	}
+func (r *Recorder) writeLocked(rx time.Time, raw []byte) error {
 	if err := r.rotate(rx.UTC().Truncate(time.Hour)); err != nil {
 		return err
 	}
@@ -182,8 +220,12 @@ func (r *Recorder) Close() error {
 	close(r.stop)
 	<-r.done
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.closed = true
+	r.mu.Unlock()
+	close(r.queue) // flush whatever is queued, then close the file
+	<-r.wdone
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.closeFileLocked()
 }
 
