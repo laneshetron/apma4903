@@ -55,9 +55,10 @@ func Collateral(price book.Price, qty book.Qty) float64 {
 }
 
 // AffordableQty is the largest whole-contract quantity <= want whose collateral fits in available.
+// A negative available means nothing fits (the estimate can dip below zero between polls).
 func AffordableQty(want book.Qty, price book.Price, available float64) book.Qty {
-	if available < 0 {
-		return want
+	if available <= 0 {
+		return 0
 	}
 	per := float64(price) / float64(book.OneDollar)
 	if per <= 0 {
@@ -82,8 +83,9 @@ type Inputs struct {
 	Strike  float64
 	Spot    *SpotState
 	Edge    *EdgeModel
-	// Available is the collateral ($) free for new orders; a negative value means unknown (no sizing).
-	Available float64
+	// Available is the collateral ($) free for new orders, used only when CapitalKnown.
+	Available    float64
+	CapitalKnown bool
 }
 
 // ActionKind is Place or Cancel.
@@ -205,7 +207,7 @@ func (s *Strategy) Decide(in Inputs) []Action {
 
 	// capital: split what is free evenly across the sides that need a new order
 	budget := in.Available
-	if budget >= 0 {
+	if in.CapitalKnown {
 		n := 0
 		for _, side := range []book.Side{book.Yes, book.No} {
 			o := in.Orders[side]
@@ -252,7 +254,10 @@ func (s *Strategy) Decide(in Inputs) []Action {
 		if improve {
 			reason = "improve"
 		}
-		qty := AffordableQty(s.P.Size, want[side], budget)
+		qty := s.P.Size
+		if in.CapitalKnown {
+			qty = AffordableQty(s.P.Size, want[side], budget)
+		}
 		if qty < 100 {
 			s.Vetoes["capital"]++
 			continue

@@ -27,7 +27,7 @@ func base() (Params, Inputs) {
 		CloseAt:   t0.Add(10 * time.Minute),
 		Strike:    76000,
 		Spot:      &SpotState{},
-		Available: -1, // unknown: no capital sizing
+		Available: 0, CapitalKnown: false, // unknown: no capital sizing
 	}
 	return p, in
 }
@@ -297,7 +297,11 @@ func TestCapitalSizing(t *testing.T) {
 	if q := AffordableQty(100*100, 5000, 0.3); q != 0 {
 		t.Fatalf("less than one contract's collateral should return 0, got %v", q)
 	}
+	if q := AffordableQty(100*100, 5000, -2); q != 0 {
+		t.Fatalf("a negative estimate must size to zero, not to the full order, got %v", q)
+	}
 	p, in := base()
+	in.CapitalKnown = true
 	in.Available = 5.0 // $5 split across both sides: $2.50 each -> 5 YES at 50c, 5 NO at 49c
 	as := NewStrategy(p).Decide(in)
 	if len(as) != 2 || as[0].Qty != 5*100 || as[1].Qty != 5*100 {

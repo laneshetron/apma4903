@@ -232,24 +232,24 @@ func (e *Engine) refreshBalance(ctx context.Context) {
 
 // freeCollateral is the exchange balance less what our working orders reserve since the last poll,
 // and in paper mode the fixed budget less all reservations and the position's cost.
-func (e *Engine) freeCollateral(l *Ledger) float64 {
+func (e *Engine) freeCollateral(l *Ledger) (float64, bool) {
 	e.mu.Lock()
 	avail, atPoll, fillCost := e.available, e.reservedAtPoll, e.fillCostSincePoll
 	e.mu.Unlock()
 	if avail < 0 {
-		return -1
+		return 0, false // unknown / unlimited
 	}
 	reserved := 0.0
 	for _, o := range l.WorkingOrders() {
 		reserved += Collateral(o.Price, o.Qty-o.Filled)
 	}
 	if e.cfg.Balance == nil {
-		return avail - l.CollateralUsed() - reserved // paper: fixed budget less position collateral and reservations
+		return avail - l.CollateralUsed() - reserved, true // paper: fixed budget less position collateral and reservations
 	}
 	// live: Kalshi's balance is gross cash (resting reservations are not deducted); fills since the
 	// poll have spent cash the poll did not see
 	_ = atPoll
-	return avail - reserved - fillCost
+	return avail - reserved - fillCost, true
 }
 
 func (e *Engine) shutdown() {
@@ -522,8 +522,9 @@ func (e *Engine) decide(ctx context.Context, now time.Time) {
 		}
 	}
 	e.mu.Unlock()
+	free, known := e.freeCollateral(l)
 	in := Inputs{Now: now, Book: bv.Book, Stale: bv.Stale, Pos: pos, Orders: views, CloseAt: m.CloseAt, Strike: m.Strike, Spot: e.spot, Edge: e.cfg.Edge,
-		Available: e.freeCollateral(l)}
+		Available: free, CapitalKnown: known}
 	for _, a := range e.strat.Decide(in) {
 		e.execute(ctx, l, a, now)
 	}
@@ -568,6 +569,10 @@ func (e *Engine) execute(ctx context.Context, l *Ledger, a Action, now time.Time
 					e.stats.Rejections++
 					e.mu.Unlock()
 					e.log.Warn("place rejected: insufficient balance", "side", a.Side)
+				case strings.Contains(err.Error(), "rate limit"):
+					e.mu.Lock()
+					e.stats.Rejections++
+					e.mu.Unlock()
 				case strings.Contains(err.Error(), "invalid_order"):
 					// post-only would have crossed: the book moved under the quote; the next book event re-decides
 					e.mu.Lock()
