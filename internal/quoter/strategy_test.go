@@ -320,3 +320,46 @@ func TestCapitalSizing(t *testing.T) {
 		t.Fatalf("no capital: no orders, got %v", as)
 	}
 }
+
+func TestFlattenAtStopTakesTheTouch(t *testing.T) {
+	p, in := base()
+	p.FlattenAtStop = true
+	in.Now = in.CloseAt.Add(-4 * time.Minute)
+	// long 60 YES with quotes still resting: first the cancels, no take yet
+	in.Pos = 60 * 100
+	in.Orders[book.Yes] = &OrderView{ID: "a", Side: book.Yes, Price: 5000, Qty: 10000, State: Resting}
+	as := NewStrategy(p).Decide(in)
+	for _, a := range as {
+		if a.Kind == Take {
+			t.Fatalf("must not take while quotes are still working: %v", as)
+		}
+	}
+	// quotes gone: sell 60 YES into the best YES bid (50c) = a NO-side take at 50c
+	in.Orders = map[book.Side]*OrderView{}
+	as = NewStrategy(p).Decide(in)
+	if len(as) != 1 || as[0].Kind != Take || as[0].Side != book.No || as[0].Price != 5000 || as[0].Qty != 60*100 {
+		t.Fatalf("want a 60-lot take at the 50c bid, got %v", as)
+	}
+	// short 30: buy YES at the ask (NO bid 49c -> YES ask 51c)
+	in.Pos = -30 * 100
+	as = NewStrategy(p).Decide(in)
+	if len(as) != 1 || as[0].Kind != Take || as[0].Side != book.Yes || as[0].Price != 5100 || as[0].Qty != 30*100 {
+		t.Fatalf("want a 30-lot take at the 51c ask, got %v", as)
+	}
+	// a take already in flight: nothing more
+	in.TakeInflight = true
+	if as := NewStrategy(p).Decide(in); len(as) != 0 {
+		t.Fatalf("no second take while one is in flight, got %v", as)
+	}
+	// flat: nothing
+	in.TakeInflight, in.Pos = false, 0
+	if as := NewStrategy(p).Decide(in); len(as) != 0 {
+		t.Fatalf("flat position needs no take, got %v", as)
+	}
+	// feature off: carry
+	p.FlattenAtStop = false
+	in.Pos = 60 * 100
+	if as := NewStrategy(p).Decide(in); len(as) != 0 {
+		t.Fatalf("with FlattenAtStop off nothing should be sent, got %v", as)
+	}
+}

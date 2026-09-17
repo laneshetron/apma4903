@@ -53,6 +53,10 @@ class Params:
     cancel_latency_ms: float | None = None   # book event seen -> our cancel effective
     signal_latency_ms: float | None = None   # spot tick seen -> our cancel effective
     capital: float | None = None             # $ available per market: resting bids reserve price x qty, fills lock the collateral paid
+    reduce_only_exempt: bool = False         # greeks cap / join gate apply only to orders that would increase |position|
+    skew_at: float | None = None             # fraction of max_pos beyond which the reducing side improves a tick and the increasing side shrinks
+    flatten_at_stop: bool = False            # at the endgame stop, cross the spread to close the position (taker fee) instead of carrying it to settlement
+    flatten_above: int | None = None         # contracts: whenever |position| exceeds this, take the touch to bring it back to this (taker fee)
     signal_venues: tuple = ("coinbase",)     # venues whose 1s mid move can trigger cancel-on-signal
     stale_feed_ms: float | None = None       # pull quotes while the latest Coinbase message arrived this late (rx - exchange ts)
     stop_before_s: float = 120.0
@@ -113,6 +117,7 @@ class MarketPnL:
     buy_cost: float = 0.0   # dollars paid for buys
     sell_proceeds: float = 0.0
     no_paid: float = 0.0    # dollars paid for NO fills (a NO bid at p locks p per contract)
+    flattened: float = 0.0  # contracts closed at the stop by taking the touch
 
     def locked(self) -> float:
         """Collateral held against the NET position: Kalshi returns the collateral of offsetting pairs."""
@@ -364,15 +369,39 @@ class Quoter:
                 r.stop_rx = rx
                 mid = book.mid()
                 if mid is not None:
-                    r.mark_pnl = r.cash + r.pos / QTY * mid / 100
                     p = mid / 100
                     r.flatten_cost = abs(r.pos) / QTY * (0.005 + TAKER_FEE * p * (1 - p))
+                    if self.p.flatten_at_stop and r.pos != 0 and book.best_yes >= 0 and book.best_no >= 0:
+                        # take the touch: sell YES into the best YES bid, or buy YES at the best YES ask (= 1 - best NO bid)
+                        n = abs(r.pos) / QTY
+                        if r.pos > 0:
+                            px = book.best_yes / ONE
+                            r.cash += n * (px - TAKER_FEE * px * (1 - px))
+                        else:
+                            px = (ONE - book.best_no) / ONE
+                            r.cash -= n * (px + TAKER_FEE * px * (1 - px))
+                        r.flattened = n
+                        r.pos = 0
+                    r.mark_pnl = r.cash + r.pos / QTY * mid / 100
             for o in orders.values():
                 if o.cancel_at is None:
                     o.cancel_at = rx + self.lat
             return
         if book.stale or book.best_yes < 0 or book.best_no < 0:
             return
+        if self.p.flatten_above is not None and abs(r.pos) > self.p.flatten_above * QTY:
+            # take the touch for the excess: sell YES into the best YES bid, or buy YES at the best YES ask
+            excess = (abs(r.pos) - self.p.flatten_above * QTY) / QTY
+            if r.pos > 0:
+                px = book.best_yes / ONE
+                r.cash += excess * (px - TAKER_FEE * px * (1 - px))
+                r.pos -= int(excess * QTY)
+            else:
+                px = (ONE - book.best_no) / ONE
+                r.cash -= excess * (px + TAKER_FEE * px * (1 - px))
+                r.pos += int(excess * QTY)
+            r.flattened += excess
+            self.vetoes["taken"] += 1
         spread = (ONE - book.best_no) - book.best_yes
         want = {
             "yes": book.best_yes + (TICK if spread > TICK else 0),
@@ -382,11 +411,20 @@ class Quoter:
         lim = self.p.max_pos * QTY - self.p.size * QTY
         allow = {"yes": pos <= lim, "no": pos >= -lim}
         p = self.p
+        reducing = {"yes": pos < 0, "no": pos > 0}   # a fill on this side moves the position toward zero
         if p.greeks_cap is not None and ctx is not None:
             g = ctx.delta_sigma10(tk, close_ns)
             if g is not None and g >= p.greeks_cap:
-                allow = {"yes": False, "no": False}
-                self.vetoes["greeks"] += 2
+                for s in ("yes", "no"):
+                    if not (p.reduce_only_exempt and reducing[s]):
+                        allow[s] = False
+                        self.vetoes["greeks"] += 1
+        skewed = {"yes": False, "no": False}
+        if p.skew_at is not None and abs(pos) >= p.skew_at * p.max_pos * QTY:
+            for s in ("yes", "no"):
+                if reducing[s] and spread <= TICK and want[s] + TICK < ONE - TICK:
+                    want[s] += TICK    # lean: improve the reducing side by a tick
+                    skewed[s] = True
         if p.stale_feed_ms is not None and self.feed_lag_ms > p.stale_feed_ms:
             allow = {"yes": False, "no": False}
             self.vetoes["stale_feed"] += 2
@@ -460,7 +498,7 @@ class Quoter:
                         (s == "yes" and gap < -p.fair_gap_join) or (s == "no" and gap > p.fair_gap_join)):
                     self.vetoes["fair_join"] += 1
                     continue
-                if p.join_theta is not None and ctx is not None and ctx.edge_model is not None:
+                if p.join_theta is not None and ctx is not None and ctx.edge_model is not None and not (p.reduce_only_exempt and reducing[s]):
                     other = "no" if s == "yes" else "yes"
                     imb = (depth[other] - depth[s]) / (depth[other] + depth[s]) if depth[other] + depth[s] > 0 else 0.0
                     q_join = 0.0 if spread > TICK else depth[s] / QTY
@@ -471,6 +509,9 @@ class Quoter:
                 # place: becomes live after latency; replaces a cancelled order once it lands
                 if o is None or rx >= o.cancel_at:
                     size = self.p.size * QTY
+                    if p.skew_at is not None and not reducing[s] and abs(pos) >= p.skew_at * p.max_pos * QTY:
+                        frac = max(0.0, 1 - (abs(pos) / QTY - p.skew_at * p.max_pos) / ((1 - p.skew_at) * p.max_pos))
+                        size = max(QTY, int(self.p.size * frac) * QTY)   # increasing side shrinks toward 1 lot at the cap
                     if p.capital is not None:
                         reserved = sum(x.price / ONE * x.remaining / QTY for x in orders.values() if x.cancel_at is None)
                         free = p.capital - r.locked() - reserved
@@ -481,7 +522,7 @@ class Quoter:
                         if size < QTY:
                             self.vetoes["capital"] += 1
                             continue
-                    orders[s] = Order(s, want[s], size, None, rx + self.lat_place, improved=spread > TICK)
+                    orders[s] = Order(s, want[s], size, None, rx + self.lat_place, improved=spread > TICK or skewed[s])
                     if p.dfair_cancel_c is not None and ctx is not None:
                         orders[s].fair_at_place = ctx.fair_c(tk, rx, close_ns, p.fair_spot, p.vol_mult, p.kernel)
 
@@ -939,6 +980,49 @@ CAPITAL = [
     Params("size 50 / max 100, $300", **_C, size=50, max_pos=100, capital=300),
 ]
 
+_I = dict(signal_move=2.0, stop_before_s=300, place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, join_theta=0.0, greeks_cap=0.05)
+INVENTORY2 = [
+    Params("size 20 / max 100, $100 (live config)", **_I, size=20, max_pos=100, capital=100),
+    Params("+ reduce-only exempt from greeks cap and join gate", **_I, size=20, max_pos=100, capital=100, reduce_only_exempt=True),
+    Params("+ skew above 50% of cap", **_I, size=20, max_pos=100, capital=100, skew_at=0.5),
+    Params("+ skew above 25% of cap", **_I, size=20, max_pos=100, capital=100, skew_at=0.25),
+    Params("+ reduce-only exempt + skew 50%", **_I, size=20, max_pos=100, capital=100, reduce_only_exempt=True, skew_at=0.5),
+    Params("size 100 / max 200 (standing)", **_I, size=100, max_pos=200),
+    Params("size 100 / max 200 + reduce-only exempt + skew 50%", **_I, size=100, max_pos=200, reduce_only_exempt=True, skew_at=0.5),
+]
+FLAT = [
+    Params("live config (20 / 100, $100), carry", **_I, size=20, max_pos=100, capital=100),
+    Params("lean always (skew 0) + reduce-only exempt + flatten at stop, max 100", **_I, size=20, max_pos=100, capital=100, reduce_only_exempt=True, skew_at=0.0, flatten_at_stop=True),
+    Params("same, max 40", **_I, size=20, max_pos=40, capital=100, reduce_only_exempt=True, skew_at=0.0, flatten_at_stop=True),
+    Params("same, max 40 + take above 20", **_I, size=20, max_pos=40, capital=100, reduce_only_exempt=True, skew_at=0.0, flatten_at_stop=True, flatten_above=20),
+    Params("same, max 40 + take above 40", **_I, size=20, max_pos=40, capital=100, reduce_only_exempt=True, skew_at=0.0, flatten_at_stop=True, flatten_above=40),
+    Params("max 20 + take above 20 (never hold more than one quote)", **_I, size=20, max_pos=20, capital=100, reduce_only_exempt=True, skew_at=0.0, flatten_at_stop=True, flatten_above=20),
+    Params("standing (100 / 200), carry", **_I, size=100, max_pos=200),
+    Params("standing + lean + reduce-only + flatten at stop + take above 100", **_I, size=100, max_pos=200, reduce_only_exempt=True, skew_at=0.0, flatten_at_stop=True, flatten_above=100),
+]
+
+CAPS = [
+    Params("size 20 / max 100, $100, flatten at stop", **_I, size=20, max_pos=100, capital=100, flatten_at_stop=True),
+    Params("size 20 / max 60, flatten", **_I, size=20, max_pos=60, capital=100, flatten_at_stop=True),
+    Params("size 20 / max 40, flatten", **_I, size=20, max_pos=40, capital=100, flatten_at_stop=True),
+    Params("size 20 / max 20, flatten", **_I, size=20, max_pos=20, capital=100, flatten_at_stop=True),
+    Params("size 10 / max 20, flatten", **_I, size=10, max_pos=20, capital=100, flatten_at_stop=True),
+    Params("size 10 / max 40, flatten", **_I, size=10, max_pos=40, capital=100, flatten_at_stop=True),
+    Params("size 20 / max 40, flatten + take above 80 (rare backstop)", **_I, size=20, max_pos=40, capital=100, flatten_at_stop=True, flatten_above=80),
+    Params("size 100 / max 200, flatten", **_I, size=100, max_pos=200, flatten_at_stop=True),
+    Params("size 100 / max 100, flatten", **_I, size=100, max_pos=100, flatten_at_stop=True),
+]
+
+FLATTEN = [
+    Params("live config (size 20 / max 100, $100), carry to settlement", **_I, size=20, max_pos=100, capital=100),
+    Params("+ flatten at stop (take the touch)", **_I, size=20, max_pos=100, capital=100, flatten_at_stop=True),
+    Params("+ reduce-only exempt + flatten", **_I, size=20, max_pos=100, capital=100, reduce_only_exempt=True, flatten_at_stop=True),
+    Params("+ reduce-only exempt + skew 50% + flatten", **_I, size=20, max_pos=100, capital=100, reduce_only_exempt=True, skew_at=0.5, flatten_at_stop=True),
+    Params("+ reduce-only + skew 50% + flatten, stop 3min", **{**_I, "stop_before_s": 180}, size=20, max_pos=100, capital=100, reduce_only_exempt=True, skew_at=0.5, flatten_at_stop=True),
+    Params("standing (size 100 / max 200), carry", **_I, size=100, max_pos=200),
+    Params("standing + reduce-only + skew 50% + flatten", **_I, size=100, max_pos=200, reduce_only_exempt=True, skew_at=0.5, flatten_at_stop=True),
+]
+
 LATSWEEP = [
     Params(f"place {a} / cancel {b} / signal {c}", **{**_M, "place_latency_ms": a, "cancel_latency_ms": b, "signal_latency_ms": c})
     for a, b, c in ((2, 2, 2), (3, 3, 6), (5, 4, 8), (5, 4, 15), (8, 6, 8), (8, 6, 15), (11, 7, 18), (17, 13, 22))
@@ -1042,8 +1126,12 @@ def main() -> None:
     ap.add_argument("--feeds", action="store_true", help="stale-feed veto and composite-signal study (AWS tape)")
     ap.add_argument("--feeds2", action="store_true", help="gemini / kraken as cancel-signal venues")
     ap.add_argument("--capital", action="store_true", help="capital-constrained sizing study (AWS tape)")
+    ap.add_argument("--inventory2", action="store_true", help="reduce-only exemption and inventory skew (AWS tape)")
+    ap.add_argument("--flatten", action="store_true", help="flatten at the endgame stop vs carry to settlement (AWS tape)")
+    ap.add_argument("--flat", action="store_true", help="stay-flat policies: lean, tight cap, take to flatten (AWS tape)")
+    ap.add_argument("--caps", action="store_true", help="position cap sweep with flatten at stop (AWS tape)")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]

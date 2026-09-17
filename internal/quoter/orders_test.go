@@ -36,6 +36,15 @@ func (f *fakeExec) Place(_ context.Context, _ string, _ book.Side, _ book.Price,
 	return id, time.Now(), nil
 }
 
+func (f *fakeExec) Take(_ context.Context, _ string, _ book.Side, _ book.Price, _ book.Qty, clientID string) (string, time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	id := "take-" + strings.TrimPrefix(clientID, "t-")
+	f.placed = append(f.placed, id)
+	return id, time.Now(), nil
+}
+
 func (f *fakeExec) Cancel(_ context.Context, _ string, orderID string) (time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

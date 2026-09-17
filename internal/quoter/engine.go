@@ -67,6 +67,7 @@ type Engine struct {
 	market            *Market
 	ledger            *Ledger
 	inflight          map[book.Side]bool   // a place is being sent
+	takeInflight      bool                 // a flattening take is being sent
 	wantCancel        map[book.Side]string // cancel requested while the place was unacknowledged
 	lastBookRx        time.Time
 	available         float64   // free collateral ($) as last polled (net of reservations at that time), -1 = unknown/unlimited
@@ -76,7 +77,7 @@ type Engine struct {
 	closedPnL         float64   // paper: mark P&L of finished markets this session
 	startBalance      float64   // live: exchange balance at the first successful poll
 	haveStart         bool
-	posAtPoll         book.Qty  // our position when the balance was polled (equity needs a consistent snapshot)
+	posAtPoll         book.Qty // our position when the balance was polled (equity needs a consistent snapshot)
 	seqGap            bool
 	halted            string
 	paused            string
@@ -100,6 +101,7 @@ type Stats struct {
 	Canceled   int            `json:"canceled"`
 	Errors     int            `json:"errors"`
 	Rejections int            `json:"rejections"`
+	Takes      int            `json:"takes"`
 	Vetoes     map[string]int `json:"vetoes"`
 	SpotLagMs  float64        `json:"coinbase_lag_ms"`
 	BookAgeMs  float64        `json:"book_age_ms"`
@@ -479,7 +481,11 @@ func (e *Engine) applyLiveFill(l *Ledger, ev feed.Event) {
 	if o.Side == book.No {
 		price = book.OneDollar - yes
 	}
-	l.OnFill(f.TradeID, Fill{Rx: ev.Rx, Ticker: f.MarketTicker, OrderID: f.OrderID, Side: o.Side, Price: price, Qty: qty, Taker: f.IsTaker})
+	fee := 0.0
+	if f.IsTaker {
+		fee = TakerFee(yes, qty)
+	}
+	l.OnFill(f.TradeID, Fill{Rx: ev.Rx, Ticker: f.MarketTicker, OrderID: f.OrderID, Side: o.Side, Price: price, Qty: qty, Taker: f.IsTaker, Fee: fee})
 	e.mu.Lock()
 	e.stats.Fills++
 	e.fillCostSincePoll += Collateral(price, qty) // a fill turns reserved collateral into position cost
@@ -583,8 +589,11 @@ func (e *Engine) decide(ctx context.Context, now time.Time) {
 	}
 	e.mu.Unlock()
 	free, known := e.freeCollateral(l)
+	e.mu.Lock()
+	takeInflight := e.takeInflight
+	e.mu.Unlock()
 	in := Inputs{Now: now, Book: bv.Book, Stale: bv.Stale, Pos: pos, Orders: views, CloseAt: m.CloseAt, Strike: m.Strike, Spot: e.spot, Edge: e.cfg.Edge,
-		Available: free, CapitalKnown: known}
+		Available: free, CapitalKnown: known, TakeInflight: takeInflight}
 	for _, a := range e.strat.Decide(in) {
 		e.execute(ctx, l, a, now)
 	}
@@ -649,6 +658,35 @@ func (e *Engine) execute(ctx context.Context, l *Ledger, a Action, now time.Time
 			}
 			e.risk.RecordOK()
 			e.afterAck(ctx)
+		}()
+	case Take:
+		e.mu.Lock()
+		if e.takeInflight {
+			e.mu.Unlock()
+			return
+		}
+		e.takeInflight = true
+		e.stats.Takes++
+		e.mu.Unlock()
+		e.risk.RecordOrder(now)
+		go func() {
+			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			err := l.Take(cctx, e.cfg.Exec, a.Side, a.Price, a.Qty, "t-"+uuid.NewString(), a.Reason, now)
+			// give the exchange a moment to report the IOC's fills before the next decision can send another
+			time.Sleep(300 * time.Millisecond)
+			e.mu.Lock()
+			e.takeInflight = false
+			e.mu.Unlock()
+			if err != nil {
+				e.risk.RecordError()
+				e.mu.Lock()
+				e.stats.Errors++
+				e.mu.Unlock()
+				e.log.Warn("take failed", "side", a.Side, "err", err)
+				return
+			}
+			e.risk.RecordOK()
 		}()
 	case Cancel:
 		if l.Working(a.Side) == nil {

@@ -51,6 +51,7 @@ func run() error {
 	greeksCap := flag.Float64("greeks-cap", 0.05, "don't quote when a 1-sigma 10s move is worth >= this (fraction of $1); 0 disables")
 	joinTheta := flag.Float64("join-theta", 0, "join gate threshold in cents (edge < -theta vetoes); needs -tables")
 	noJoinGate := flag.Bool("no-join-gate", false, "disable the join gate")
+	flatten := flag.Bool("flatten-at-stop", true, "cross the spread to close the position at the endgame stop instead of carrying it to settlement")
 	shard := flag.Int("shard", 2, "exchange_index for live orders (crypto = 2)")
 	maxLoss := flag.Float64("max-loss", 50, "halt when session mark-to-market loss exceeds this ($)")
 	placeLat := flag.Duration("paper-place-latency", 9*time.Millisecond, "paper: simulated place latency")
@@ -86,7 +87,7 @@ func run() error {
 		log.Info("edge model", "fitted_on", edge.FittedOn)
 	}
 	params := quoter.Params{
-		Size: book.Qty(*size * 100), MaxPos: book.Qty(*maxPos * 100), StopBefore: *stopBefore, SignalMove: *signalMove,
+		Size: book.Qty(*size * 100), MaxPos: book.Qty(*maxPos * 100), StopBefore: *stopBefore, SignalMove: *signalMove, FlattenAtStop: *flatten,
 	}
 	if edge != nil {
 		th := *joinTheta

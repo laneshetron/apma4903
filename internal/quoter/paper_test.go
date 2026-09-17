@@ -179,3 +179,26 @@ func TestPaperFeedLagOrdersAheadAndTradesBeforeCancel(t *testing.T) {
 		t.Fatalf("post-cancel trade must not fill: %v", fills)
 	}
 }
+
+func TestPaperTakeFillsAtPriceWithFee(t *testing.T) {
+	b := mkBook(5000, 1000, 4900, 1000)
+	var fills []Fill
+	p := NewPaperExecutor(0, 0, func(string) (*book.Book, bool) { return b, true }, func(_ string, f Fill) { fills = append(fills, f) })
+	// sell 60 YES into the 50c bid
+	if _, _, err := p.Take(context.Background(), "M", book.No, 5000, 60*100, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fills) != 1 || fills[0].Side != book.No || fills[0].Price != 5000 || fills[0].Qty != 60*100 || !fills[0].Taker {
+		t.Fatalf("bad take fill %+v", fills)
+	}
+	want := 0.07 * 0.5 * 0.5 * 60 // fee at p=0.5 on 60 contracts = $1.05
+	if f := fills[0].Fee; f < want-1e-9 || f > want+1e-9 {
+		t.Fatalf("fee %v, want %v", f, want)
+	}
+	l := NewLedger("M", nil)
+	l.OnFill("f1", fills[0])
+	pos, cash := l.Position()
+	if pos != -60*100 || cash < 30-1.05-1e-9 || cash > 30-1.05+1e-9 {
+		t.Fatalf("selling 60 YES at 50c less the fee: pos %v cash %v", pos, cash)
+	}
+}

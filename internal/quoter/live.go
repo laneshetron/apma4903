@@ -62,6 +62,33 @@ func (e *LiveExecutor) Place(ctx context.Context, ticker string, side book.Side,
 	return resp.JSON201.OrderId, time.UnixMilli(resp.JSON201.TsMs), nil
 }
 
+// Take sends an immediate-or-cancel order that crosses the spread.
+func (e *LiveExecutor) Take(ctx context.Context, ticker string, side book.Side, price book.Price, qty book.Qty, clientID string) (string, time.Time, error) {
+	if e.bucket != nil && !e.bucket.Take(CostOrder) {
+		return "", time.Time{}, fmt.Errorf("rate limit: no write tokens for an order")
+	}
+	postOnly := false
+	ex := gen.ExchangeIndex(e.shard)
+	req := gen.CreateOrderV2Request{
+		Ticker: ticker, Count: qty.String(), ClientOrderId: clientID, TimeInForce: gen.ImmediateOrCancel,
+		PostOnly: &postOnly, SelfTradePreventionType: gen.TakerAtCross, ExchangeIndex: &ex,
+	}
+	// side Yes: buy YES at the ask price; side No: sell YES at the bid price (both quoted on the YES book)
+	if side == book.Yes {
+		req.Side, req.Price = gen.Bid, price.String()
+	} else {
+		req.Side, req.Price = gen.Ask, price.String()
+	}
+	resp, err := e.cl.CreateOrderV2WithResponse(ctx, req)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if resp.JSON201 == nil {
+		return "", time.Time{}, fmt.Errorf("take: HTTP %d %s", resp.StatusCode(), truncate(resp.Body, 200))
+	}
+	return resp.JSON201.OrderId, time.UnixMilli(resp.JSON201.TsMs), nil
+}
+
 // Cancel cancels orderID on the executor's shard.
 func (e *LiveExecutor) Cancel(ctx context.Context, _ string, orderID string) (time.Time, error) {
 	if e.bucket != nil && !e.bucket.Take(CostCancel) {

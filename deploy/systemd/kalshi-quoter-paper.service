@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 User=kalshi
 WorkingDirectory=/opt/kalshi
-ExecStart=/opt/kalshi/bin/quoter -config /opt/kalshi/config.yaml -mode paper -tables /opt/kalshi/quoter_tables.json -status 127.0.0.1:8082
+ExecStart=/opt/kalshi/bin/quoter -config /opt/kalshi/config.yaml -mode paper -size 20 -max-pos 20 -paper-capital 100 -tables /opt/kalshi/quoter_tables.json -status 127.0.0.1:8082
 Restart=always
 RestartSec=5
 LimitNOFILE=65536

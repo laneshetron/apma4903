@@ -304,6 +304,10 @@ type rejectingExec struct {
 	msg string
 }
 
+func (r *rejectingExec) Take(context.Context, string, book.Side, book.Price, book.Qty, string) (string, time.Time, error) {
+	return "", time.Time{}, fmt.Errorf("create order: HTTP 400 {\"error\":{\"code\":\"%s\"}}", r.msg)
+}
+
 func (r *rejectingExec) Place(context.Context, string, book.Side, book.Price, book.Qty, string) (string, time.Time, error) {
 	return "", time.Time{}, fmt.Errorf("create order: HTTP 400 {\"error\":{\"code\":\"%s\"}}", r.msg)
 }
@@ -490,5 +494,35 @@ func TestEngineLiveSessionLossUsesExchangeBalance(t *testing.T) {
 	}
 	if s := eng.Stats(); s.Halted == "" || s.SessionPnL > -29.9 {
 		t.Fatalf("balance drop of $30 should halt at a $20 limit, got %+v", s)
+	}
+}
+
+func TestEngineFlattensAtTheStop(t *testing.T) {
+	tk := "KXBTC15M-TEST"
+	src := &fakeSource{books: map[string]*book.Book{tk: mkBook(5000, 100, 4900, 300*100)}} // 1 ahead on YES
+	var eng *Engine
+	paper := NewPaperExecutor(0, 0, func(tk string) (*book.Book, bool) { bv, ok := src.Book(tk); return bv.Book, ok }, func(id string, f Fill) { eng.PaperFill(id, f) })
+	closeAt := time.Now().Add(5*time.Minute + 700*time.Millisecond) // the stop (T-5min) arrives in ~0.7s
+	eng = NewEngine(EngineConfig{
+		Params: Params{Size: 20 * 100, MaxPos: 100 * 100, StopBefore: 5 * time.Minute, FlattenAtStop: true}, Limits: testLimits(), Mode: "paper", Exec: paper, Paper: paper, Feed: src, Capital: -1,
+		PickMarket: func(context.Context) (*Market, error) {
+			return &Market{Ticker: tk, Strike: 76000, CloseAt: closeAt}, nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = eng.Run(ctx) }()
+	eng.OnFeedEvent(delta(tk, book.Yes, 5000, 100, 1))
+	waitFor(t, "quotes", func() bool { return len(eng.Stats().Working) == 2 })
+	eng.OnFeedEvent(trade(tk, 5000, 21*100, "no", 2)) // fills our 20 YES
+	waitFor(t, "long 20", func() bool { return eng.Stats().Pos == "20.00" })
+	// at the stop the quotes are cancelled and the 20 are sold into the bid
+	waitFor(t, "flat after the stop", func() bool {
+		s := eng.Stats()
+		return s.Pos == "0.00" && s.Takes == 1 && len(s.Working) == 0
+	})
+	// ~$10 in, ~$10 out, minus the taker fee on 20 at 50c ($0.35)
+	if s := eng.Stats(); s.Cash > -0.34 || s.Cash < -0.36 {
+		t.Fatalf("cash after a round trip at 50c should be the fee only, got %v", s.Cash)
 	}
 }

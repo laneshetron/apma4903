@@ -17,6 +17,10 @@ type Executor interface {
 	Place(ctx context.Context, ticker string, side book.Side, price book.Price, qty book.Qty, clientID string) (orderID string, engineTs time.Time, err error)
 	// Cancel cancels orderID (market ticker given for routing).
 	Cancel(ctx context.Context, ticker, orderID string) (engineTs time.Time, err error)
+	// Take crosses the spread with an immediate-or-cancel order: side Yes buys
+	// YES at price (the ask), side No sells YES at price (the bid). Fills are
+	// reported through the normal fill path; the return is the accepted order.
+	Take(ctx context.Context, ticker string, side book.Side, price book.Price, qty book.Qty, clientID string) (orderID string, engineTs time.Time, err error)
 }
 
 // Order is a working or finished order.
@@ -39,10 +43,17 @@ type Fill struct {
 	Rx      time.Time
 	Ticker  string
 	OrderID string
-	Side    book.Side
-	Price   book.Price
+	Side    book.Side  // Yes: we bought YES at Price; No: we sold YES at 1-Price (bought NO at Price)
+	Price   book.Price // price on our side's book
 	Qty     book.Qty
 	Taker   bool
+	Fee     float64 // dollars, charged for taker fills
+}
+
+// TakerFee is Kalshi's taker fee on crypto series: 0.07 x p x (1-p) per contract.
+func TakerFee(yesPrice book.Price, qty book.Qty) float64 {
+	p := float64(yesPrice) / float64(book.OneDollar)
+	return 0.07 * p * (1 - p) * float64(qty) / 100
 }
 
 // Ledger is the order state machine and position book for one market. It is
@@ -171,6 +182,38 @@ func (l *Ledger) Place(ctx context.Context, ex Executor, side book.Side, price b
 	return nil
 }
 
+// Take sends a flattening IOC order. It occupies the side like a resting
+// order until the exchange reports it done (IOC orders finish immediately).
+func (l *Ledger) Take(ctx context.Context, ex Executor, side book.Side, price book.Price, qty book.Qty, clientID, reason string, now time.Time) error {
+	l.mu.Lock()
+	if w := l.working[side]; w != nil {
+		l.mu.Unlock()
+		return fmt.Errorf("ledger: %s side already has a working order (%s)", side, w.State)
+	}
+	o := &Order{ClientID: clientID, Ticker: l.ticker, Side: side, Price: price, Qty: qty, State: PendingNew, Placed: now, Reason: reason}
+	l.orders[clientID] = o
+	l.working[side] = o
+	l.mu.Unlock()
+	l.onEvent("take", map[string]any{"client_id": clientID, "side": side.String(), "price": price.String(), "qty": qty.String(), "reason": reason})
+	id, engineTs, err := ex.Take(ctx, l.ticker, side, price, qty, clientID)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err != nil {
+		o.State = Done
+		if l.working[side] == o {
+			delete(l.working, side)
+		}
+		l.onEvent("take_rejected", map[string]any{"client_id": clientID, "err": err.Error()})
+		return err
+	}
+	o.ID, o.Acked = id, time.Now()
+	l.byID[id] = o
+	l.onEvent("take_ack", map[string]any{"client_id": clientID, "order_id": id, "engine_ts": engineTs.UnixMilli()})
+	// an IOC is finished as soon as it is acknowledged; fills arrive on the fill path and free the side
+	l.finishLocked(o, "ioc_done")
+	return nil
+}
+
 // Cancel moves the side's working order to pending-cancel and sends the
 // cancel. A cancel requested while the place is still unacknowledged is
 // deferred: the caller should call Cancel again once the order is Resting.
@@ -288,8 +331,9 @@ func (l *Ledger) OnFill(fillID string, f Fill) {
 		l.pos -= f.Qty
 		l.cash += contracts * float64(book.OneDollar-f.Price) / 10000
 	}
+	l.cash -= f.Fee
 	l.fills = append(l.fills, f)
-	l.onEvent("fill", map[string]any{"order_id": f.OrderID, "side": f.Side.String(), "price": f.Price.String(), "qty": f.Qty.String(), "pos": l.pos.String()})
+	l.onEvent("fill", map[string]any{"order_id": f.OrderID, "side": f.Side.String(), "price": f.Price.String(), "qty": f.Qty.String(), "pos": l.pos.String(), "taker": f.Taker, "fee": f.Fee})
 }
 
 // CollateralUsed is what Kalshi holds against the net position: the average

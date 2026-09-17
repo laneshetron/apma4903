@@ -15,15 +15,16 @@ const Tick book.Price = 100
 
 // Params are the strategy settings (the sim's Params, standing config).
 type Params struct {
-	Size       book.Qty      // contracts per quote (qty units: contracts * 100)
-	MaxPos     book.Qty      // absolute position limit (qty units)
-	StopBefore time.Duration // stop quoting this long before close
-	SignalMove float64       // $ Coinbase mid move over 1s that pulls the stale side; 0 disables
-	Cooldown   time.Duration // no re-quote on the stale side for this long after a signal
-	JoinTheta  *float64      // join gate: refuse to join when expected edge < -theta (cents); nil disables
-	GreeksCap  *float64      // don't quote when a 1-sigma 10s spot move is worth >= cap (fraction of $1); nil disables
-	MinPrice   book.Price    // don't quote below this (default 1c)
-	MaxPrice   book.Price    // don't quote above this (default 99c)
+	Size          book.Qty      // contracts per quote (qty units: contracts * 100)
+	MaxPos        book.Qty      // absolute position limit (qty units)
+	StopBefore    time.Duration // stop quoting this long before close
+	SignalMove    float64       // $ Coinbase mid move over 1s that pulls the stale side; 0 disables
+	Cooldown      time.Duration // no re-quote on the stale side for this long after a signal
+	JoinTheta     *float64      // join gate: refuse to join when expected edge < -theta (cents); nil disables
+	GreeksCap     *float64      // don't quote when a 1-sigma 10s spot move is worth >= cap (fraction of $1); nil disables
+	MinPrice      book.Price    // don't quote below this (default 1c)
+	MaxPrice      book.Price    // don't quote above this (default 99c)
+	FlattenAtStop bool          // at the endgame stop, cross the spread to close the position instead of carrying it
 }
 
 // OrderState is where an order is in its lifecycle.
@@ -74,15 +75,16 @@ func AffordableQty(want book.Qty, price book.Price, available float64) book.Qty 
 
 // Inputs is the market and account state at a decision point.
 type Inputs struct {
-	Now     time.Time
-	Book    *book.Book
-	Stale   bool // book not trustworthy (waiting for snapshot)
-	Pos     book.Qty
-	Orders  map[book.Side]*OrderView // at most one working order per side
-	CloseAt time.Time
-	Strike  float64
-	Spot    *SpotState
-	Edge    *EdgeModel
+	Now          time.Time
+	Book         *book.Book
+	Stale        bool // book not trustworthy (waiting for snapshot)
+	Pos          book.Qty
+	Orders       map[book.Side]*OrderView // at most one working order per side
+	CloseAt      time.Time
+	Strike       float64
+	Spot         *SpotState
+	Edge         *EdgeModel
+	TakeInflight bool // a flattening order is being sent; don't send another
 	// Available is the collateral ($) free for new orders, used only when CapitalKnown.
 	Available    float64
 	CapitalKnown bool
@@ -94,6 +96,7 @@ type ActionKind int
 const (
 	Place ActionKind = iota
 	Cancel
+	Take // cross the spread: Side Yes = buy YES at the ask, Side No = sell YES into the bid (buy NO)
 )
 
 // Action is a decision the executor should carry out.
@@ -106,8 +109,11 @@ type Action struct {
 }
 
 func (a Action) String() string {
-	if a.Kind == Cancel {
+	switch a.Kind {
+	case Cancel:
 		return fmt.Sprintf("cancel %s (%s)", a.Side, a.Reason)
+	case Take:
+		return fmt.Sprintf("take %s %s x %s (%s)", a.Side, a.Price, a.Qty, a.Reason)
 	}
 	return fmt.Sprintf("place %s %s x %s (%s)", a.Side, a.Price, a.Qty, a.Reason)
 }
@@ -167,6 +173,26 @@ func (s *Strategy) Decide(in Inputs) []Action {
 	}
 	if !in.Now.Before(in.CloseAt.Add(-s.P.StopBefore)) {
 		cancelAll("endgame")
+		if s.P.FlattenAtStop && in.Pos != 0 && !in.TakeInflight && in.Book != nil && !in.Stale {
+			// once the resting quotes are gone, take the touch for the whole position
+			working := false
+			for _, o := range in.Orders {
+				if o != nil && o.State != Done {
+					working = true
+				}
+			}
+			if !working {
+				if in.Pos > 0 {
+					if bid, ok := in.Book.BestBid(book.Yes); ok {
+						out = append(out, Action{Kind: Take, Side: book.No, Price: bid.Price, Qty: in.Pos, Reason: "flatten"})
+					}
+				} else {
+					if ask, ok := in.Book.BestAsk(book.Yes); ok {
+						out = append(out, Action{Kind: Take, Side: book.Yes, Price: ask.Price, Qty: -in.Pos, Reason: "flatten"})
+					}
+				}
+			}
+		}
 		return out
 	}
 	if in.Stale || in.Book == nil {

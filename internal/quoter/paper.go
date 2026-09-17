@@ -124,6 +124,35 @@ func (p *PaperExecutor) Cancel(ctx context.Context, _ string, orderID string) (t
 	return o.cancelAt, nil
 }
 
+// Take fills immediately at price (the touch is assumed deep enough) and charges the taker fee.
+func (p *PaperExecutor) Take(ctx context.Context, ticker string, side book.Side, price book.Price, qty book.Qty, clientID string) (string, time.Time, error) {
+	select {
+	case <-time.After(p.PlaceLatency):
+	case <-ctx.Done():
+		return "", time.Time{}, ctx.Err()
+	}
+	p.mu.Lock()
+	p.nextID++
+	id := fmt.Sprintf("paper-take-%d", p.nextID)
+	p.nextFill++
+	fid := fmt.Sprintf("paperfill-%d", p.nextFill)
+	p.mu.Unlock()
+	yes := price
+	if side == book.No {
+		yes = book.OneDollar - price // selling YES into the YES bid at price: our NO-side price is 1-bid
+	}
+	f := Fill{Rx: time.Now(), Ticker: ticker, OrderID: id, Side: side, Qty: qty, Taker: true, Fee: TakerFee(yes, qty)}
+	if side == book.Yes {
+		f.Price = price // bought YES at the ask
+	} else {
+		f.Price = book.OneDollar - price // NO-side price for a YES sale at the bid
+	}
+	if p.OnFill != nil {
+		p.OnFill(fid, f)
+	}
+	return id, time.Now(), nil
+}
+
 // Ahead returns the simulated queue position of orderID (contracts), for the tape.
 func (p *PaperExecutor) Ahead(orderID string) (float64, bool) {
 	p.mu.Lock()

@@ -55,7 +55,7 @@ func (f *fakeKalshi) handler() http.Handler {
 			_, _ = w.Write([]byte(`{"error":{"code":"insufficient_balance","message":"insufficient balance"}}`))
 			return
 		}
-		id := "ord-" + req["client_order_id"].(string)[:6]
+		id := "ord-" + req["client_order_id"].(string)
 		f.resting[id] = true
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(map[string]any{"order_id": id, "ts_ms": time.Now().UnixMilli(), "fill_count": "0.00", "remaining_count": req["count"]})
@@ -172,5 +172,23 @@ func TestLiveExecutorRecoverCancelsStraysAndReturnsPosition(t *testing.T) {
 	}
 	if len(fk.cancels) != 2 || len(fk.resting) != 0 {
 		t.Fatalf("stray orders not cancelled: cancels=%v resting=%v", fk.cancels, fk.resting)
+	}
+}
+
+func TestLiveExecutorTakeIsIOCNotPostOnly(t *testing.T) {
+	fk := &fakeKalshi{resting: map[string]bool{}, balance: 100}
+	ex := newLive(t, fk)
+	if _, _, err := ex.Take(context.Background(), "M", book.No, 5000, 60*100, "t-1"); err != nil {
+		t.Fatal(err)
+	}
+	r := fk.orders[0]
+	if r["side"] != "ask" || r["price"] != "0.5000" || r["count"] != "60.00" || r["post_only"] != false || r["time_in_force"] != "immediate_or_cancel" {
+		t.Fatalf("take request wrong: %v", r)
+	}
+	if _, _, err := ex.Take(context.Background(), "M", book.Yes, 5100, 30*100, "t-2"); err != nil {
+		t.Fatal(err)
+	}
+	if r := fk.orders[1]; r["side"] != "bid" || r["price"] != "0.5100" {
+		t.Fatalf("buying YES at the ask should be a bid at the ask price: %v", r)
 	}
 }
