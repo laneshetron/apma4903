@@ -85,6 +85,15 @@ func (f *fakeKalshi) handler() http.Handler {
 	mux.HandleFunc("GET /trade-api/v2/portfolio/positions", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"market_positions": []map[string]any{{"ticker": r.URL.Query().Get("ticker"), "position_fp": f.position}}, "event_positions": []any{}})
 	})
+	mux.HandleFunc("GET /trade-api/v2/portfolio/orders/queue_positions", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		var qs []map[string]any
+		for id := range f.resting {
+			qs = append(qs, map[string]any{"order_id": id, "market_ticker": r.URL.Query().Get("market_tickers"), "queue_position_fp": "1234.50"})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"queue_positions": qs})
+	})
 	mux.HandleFunc("GET /trade-api/v2/exchange/status", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{}`)) })
 	return jsonMW(mux)
 }
@@ -190,5 +199,22 @@ func TestLiveExecutorTakeIsIOCNotPostOnly(t *testing.T) {
 	}
 	if r := fk.orders[1]; r["side"] != "bid" || r["price"] != "0.5100" {
 		t.Fatalf("buying YES at the ask should be a bid at the ask price: %v", r)
+	}
+}
+
+func TestLiveQueuePositions(t *testing.T) {
+	fk := &fakeKalshi{resting: map[string]bool{}, balance: 1e9}
+	ex := newLive(t, fk)
+	ctx := context.Background()
+	id, _, err := ex.Place(ctx, "M", book.Yes, 5000, 1000, "c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos, err := ex.QueuePositions(ctx, "M")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pos[id] != 123450 {
+		t.Fatalf("queue position = %v, want 1234.50 contracts", pos)
 	}
 }

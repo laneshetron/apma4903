@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -546,4 +547,50 @@ func TestEngineSessionStartIncludesRecoveredPosition(t *testing.T) {
 	if s := eng.Stats(); s.SessionPnL < -0.01 || s.SessionPnL > 0.01 {
 		t.Fatalf("an inherited position must not count as session profit, got %v", s.SessionPnL)
 	}
+}
+
+// Live mode polls the exchange's queue position of every resting order and
+// shows it on the status page.
+func TestEnginePollsQueuePositions(t *testing.T) {
+	tk := "KXBTC15M-TEST"
+	src := &fakeSource{books: map[string]*book.Book{tk: mkBook(5000, 300*100, 4900, 300*100)}}
+	ex := &fakeExec{}
+	var polls int32
+	eng := NewEngine(EngineConfig{
+		Params: Params{Size: 5 * 100, MaxPos: 10 * 100, StopBefore: 5 * time.Minute}, Limits: testLimits(), Mode: "live", Exec: ex, Feed: src, Capital: -1,
+		PickMarket: func(context.Context) (*Market, error) {
+			return &Market{Ticker: tk, Strike: 76000, CloseAt: time.Now().Add(10 * time.Minute)}, nil
+		},
+		QueuePos: func(_ context.Context, ticker string) (map[string]book.Qty, error) {
+			atomic.AddInt32(&polls, 1)
+			ex.mu.Lock()
+			defer ex.mu.Unlock()
+			out := map[string]book.Qty{}
+			for _, id := range ex.placed {
+				out[id] = 777 * 100
+			}
+			return out, nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = eng.Run(ctx) }()
+	eng.OnFeedEvent(delta(tk, book.Yes, 5000, 100, 1))
+	waitFor(t, "quotes", func() bool { return len(eng.Stats().Working) == 2 })
+	// orders are PendingNew until the user_orders stream says resting
+	for _, side := range []book.Side{book.Yes, book.No} {
+		o := eng.ledger.Working(side)
+		eng.ledger.OnOrderUpdate(o.ID, o.ClientID, "resting", o.Qty)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		s := eng.Stats()
+		if w, ok := s.Working["yes"].(map[string]any); ok {
+			if a, ok := w["ahead"].(float64); ok && a == 777.0 {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("queue position not polled/shown: polls=%d working=%v", atomic.LoadInt32(&polls), eng.Stats().Working)
 }

@@ -112,6 +112,27 @@ func (e *LiveExecutor) Cancel(ctx context.Context, _ string, orderID string) (ti
 	return time.UnixMilli(resp.JSON200.TsMs), reduced, nil
 }
 
+// QueuePositions returns contracts ahead of each of our resting orders on
+// ticker (price-time priority), keyed by order id.
+func (e *LiveExecutor) QueuePositions(ctx context.Context, ticker string) (map[string]book.Qty, error) {
+	resp, err := e.cl.GetOrderQueuePositionsWithResponse(ctx, &gen.GetOrderQueuePositionsParams{MarketTickers: &ticker})
+	if err != nil {
+		return nil, err
+	}
+	if resp.JSON200 == nil {
+		return nil, fmt.Errorf("queue positions: HTTP %d %s", resp.StatusCode(), truncate(resp.Body, 200))
+	}
+	out := map[string]book.Qty{}
+	for _, q := range resp.JSON200.QueuePositions {
+		n, err := book.ParseQty(string(q.QueuePositionFp))
+		if err != nil {
+			return nil, fmt.Errorf("queue positions: %q: %w", q.QueuePositionFp, err)
+		}
+		out[q.OrderId] = n
+	}
+	return out, nil
+}
+
 // Recover cancels any resting orders on ticker left by a previous process and
 // returns the current signed YES position.
 func (e *LiveExecutor) Recover(ctx context.Context, ticker string) (book.Qty, error) {

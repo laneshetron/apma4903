@@ -50,6 +50,9 @@ type EngineConfig struct {
 	// Recover, if set (live), is called when a market is adopted: it should cancel any resting
 	// orders left on that market by a previous process and return the current position.
 	Recover func(ctx context.Context, ticker string) (pos book.Qty, err error)
+	// QueuePos, when set (live), is polled every second for the contracts ahead
+	// of each resting order; the readings go to the tape as queue_pos events.
+	QueuePos func(ctx context.Context, ticker string) (map[string]book.Qty, error)
 }
 
 // Engine runs the strategy on one market at a time.
@@ -76,6 +79,8 @@ type Engine struct {
 	started           time.Time // engine start, or the last market roll
 	closedPnL         float64   // paper: mark P&L of finished markets this session
 	startBalance      float64   // live: exchange balance at the first successful poll
+	qposInflight      bool
+	queueAhead        map[string]book.Qty // live: last polled contracts ahead, by order id
 	haveStart         bool
 	posAtPoll         book.Qty // our position when the balance was polled (equity needs a consistent snapshot)
 	seqGap            bool
@@ -191,6 +196,8 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.refreshBalance(ctx)
 	bal := time.NewTicker(5 * time.Second)
 	defer bal.Stop()
+	qpos := time.NewTicker(time.Second)
+	defer qpos.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -206,8 +213,69 @@ func (e *Engine) Run(ctx context.Context) error {
 			e.rollMarket(ctx)
 		case <-bal.C:
 			e.refreshBalance(ctx)
+		case <-qpos.C:
+			e.pollQueuePositions(ctx)
 		}
 	}
+}
+
+// pollQueuePositions records the exchange's queue position of every resting
+// order (live only); the read runs off the event loop and at most one at a time.
+func (e *Engine) pollQueuePositions(ctx context.Context) {
+	if e.cfg.QueuePos == nil {
+		return
+	}
+	e.mu.Lock()
+	l := e.ledger
+	if l == nil || e.qposInflight {
+		e.mu.Unlock()
+		return
+	}
+	views, _ := l.Views()
+	resting := map[string]*OrderView{}
+	for _, v := range views {
+		if v.State == Resting {
+			resting[v.ID] = v
+		}
+	}
+	if len(resting) == 0 {
+		e.mu.Unlock()
+		return
+	}
+	e.qposInflight = true
+	e.mu.Unlock()
+	go func() {
+		defer func() { e.mu.Lock(); e.qposInflight = false; e.mu.Unlock() }()
+		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		t0 := time.Now()
+		pos, err := e.cfg.QueuePos(cctx, l.ticker)
+		if err != nil {
+			e.tape("queue_pos_error", map[string]any{"ticker": l.ticker, "err": err.Error()})
+			return
+		}
+		e.mu.Lock()
+		if e.queueAhead == nil {
+			e.queueAhead = map[string]book.Qty{}
+		}
+		for id := range e.queueAhead {
+			if _, ok := resting[id]; !ok {
+				delete(e.queueAhead, id)
+			}
+		}
+		e.mu.Unlock()
+		for id, v := range resting {
+			ahead, ok := pos[id]
+			if !ok {
+				continue // filled or cancelled between the view and the read
+			}
+			e.mu.Lock()
+			e.queueAhead[id] = ahead
+			e.mu.Unlock()
+			e.tape("queue_pos", map[string]any{"ticker": l.ticker, "order_id": id, "side": v.Side.String(), "price": v.Price.String(),
+				"qty": v.Qty.String(), "ahead": ahead.String(), "rtt_ms": float64(time.Since(t0).Microseconds()) / 1e3})
+		}
+	}()
 }
 
 // refreshBalance polls the exchange for free collateral (live mode).
@@ -792,6 +860,8 @@ func (e *Engine) Stats() Stats {
 				if a, ok := e.cfg.Paper.Ahead(v.ID); ok {
 					w["ahead"] = a
 				}
+			} else if a, ok := e.queueAhead[v.ID]; ok {
+				w["ahead"] = float64(a) / 100
 			}
 			s.Working[side.String()] = w
 		}
