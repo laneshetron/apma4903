@@ -52,6 +52,7 @@ class Params:
     place_latency_ms: float | None = None    # book event seen -> our order live at the engine
     cancel_latency_ms: float | None = None   # book event seen -> our cancel effective
     signal_latency_ms: float | None = None   # spot tick seen -> our cancel effective
+    capital: float | None = None             # $ available per market: resting bids reserve price x qty, fills lock the collateral paid
     signal_venues: tuple = ("coinbase",)     # venues whose 1s mid move can trigger cancel-on-signal
     stale_feed_ms: float | None = None       # pull quotes while the latest Coinbase message arrived this late (rx - exchange ts)
     stop_before_s: float = 120.0
@@ -111,6 +112,15 @@ class MarketPnL:
     market_volume: int = 0
     buy_cost: float = 0.0   # dollars paid for buys
     sell_proceeds: float = 0.0
+    no_paid: float = 0.0    # dollars paid for NO fills (a NO bid at p locks p per contract)
+
+    def locked(self) -> float:
+        """Collateral held against the NET position: Kalshi returns the collateral of offsetting pairs."""
+        if self.pos > 0 and self.bought:
+            return self.pos / QTY * (self.buy_cost / (self.bought / QTY))
+        if self.pos < 0 and self.sold:
+            return -self.pos / QTY * (self.no_paid / (self.sold / QTY))
+        return 0.0
     spread_capture: float = 0.0   # dollars: sum over fills of (mid - price) * qty, signed
     inventory_pnl: float = 0.0    # dollars: sum over time of pos * d(mid)
     last_mid: float | None = None # cents
@@ -175,6 +185,7 @@ class Quoter:
             proceeds = (ONE - o.price) / ONE * qty / QTY
             r.cash += proceeds
             r.sell_proceeds += proceeds
+            r.no_paid += o.price / ONE * qty / QTY
             r.pos -= qty
             r.sold += qty
             px, sign = (ONE - o.price) / 100, 1
@@ -459,7 +470,18 @@ class Quoter:
                         continue
                 # place: becomes live after latency; replaces a cancelled order once it lands
                 if o is None or rx >= o.cancel_at:
-                    orders[s] = Order(s, want[s], self.p.size * QTY, None, rx + self.lat_place, improved=spread > TICK)
+                    size = self.p.size * QTY
+                    if p.capital is not None:
+                        reserved = sum(x.price / ONE * x.remaining / QTY for x in orders.values() if x.cancel_at is None)
+                        free = p.capital - r.locked() - reserved
+                        other_needs = 1 if (allow[("no" if s == "yes" else "yes")] and ("no" if s == "yes" else "yes") not in orders) else 0
+                        budget = free / (1 + other_needs)
+                        afford = int(budget / (want[s] / ONE)) if want[s] > 0 else 0
+                        size = min(self.p.size, max(0, afford)) * QTY
+                        if size < QTY:
+                            self.vetoes["capital"] += 1
+                            continue
+                    orders[s] = Order(s, want[s], size, None, rx + self.lat_place, improved=spread > TICK)
                     if p.dfair_cancel_c is not None and ctx is not None:
                         orders[s].fair_at_place = ctx.fair_c(tk, rx, close_ns, p.fair_spot, p.vol_mult, p.kernel)
 
@@ -906,6 +928,17 @@ FEEDS2 = [
     Params("coinbase|kraken signal", **_R, signal_venues=("coinbase", "kraken")),
 ]
 
+_C = dict(signal_move=2.0, stop_before_s=300, place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, join_theta=0.0, greeks_cap=0.05)
+CAPITAL = [
+    Params("size 100 / max 200, unlimited capital (standing)", **_C, size=100, max_pos=200),
+    Params("size 5 / max 10, $5 (what we ran)", **_C, size=5, max_pos=10, capital=5),
+    Params("size 10 / max 50, $100", **_C, size=10, max_pos=50, capital=100),
+    Params("size 20 / max 100, $100", **_C, size=20, max_pos=100, capital=100),
+    Params("size 10 / max 50, unlimited", **_C, size=10, max_pos=50),
+    Params("size 20 / max 60, $150", **_C, size=20, max_pos=60, capital=150),
+    Params("size 50 / max 100, $300", **_C, size=50, max_pos=100, capital=300),
+]
+
 LATSWEEP = [
     Params(f"place {a} / cancel {b} / signal {c}", **{**_M, "place_latency_ms": a, "cancel_latency_ms": b, "signal_latency_ms": c})
     for a, b, c in ((2, 2, 2), (3, 3, 6), (5, 4, 8), (5, 4, 15), (8, 6, 8), (8, 6, 15), (11, 7, 18), (17, 13, 22))
@@ -1008,8 +1041,9 @@ def main() -> None:
     ap.add_argument("--awstape", action="store_true", help="measured latencies for the AWS-recorded tape (no clock-skew conversion)")
     ap.add_argument("--feeds", action="store_true", help="stale-feed veto and composite-signal study (AWS tape)")
     ap.add_argument("--feeds2", action="store_true", help="gemini / kraken as cancel-signal venues")
+    ap.add_argument("--capital", action="store_true", help="capital-constrained sizing study (AWS tape)")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]

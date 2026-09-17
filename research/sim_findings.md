@@ -325,3 +325,21 @@ Conclusion: keep Coinbase as the sole cancel signal; feed staleness is not worth
 `cmd/wsprobe`: four connections pinned to az2 WS nodes, same market, 98k deltas: engine->rx 5.6-5.9 ms p50 per connection; taking the earliest copy of each delta gains mean 0.88 ms (p50 0.56, p90 1.9, p99 5.9) over a single connection. Node 18.217.10.53 was first 39% of the time and ~0.3 ms faster at p50. Cheap and worth building into the quoter: pin to the fastest node and de-duplicate 2-3 sessions by content.
 
 Gemini as a cancel-signal venue (`sim_2026-09-16_feeds2.md`; Gemini top-of-book quotes now normalized, 677k updates vs Coinbase's 134k in 4.6 h, exchange ts -> receipt 28/48/81 ms p10/p50/p90 from Ohio): gemini-only $19.1/mkt (0.16c/ct), coinbase|gemini $22.4, coinbase|kraken $27.1, vs Coinbase-only $28.3. Gemini is a stable, moderately lagged feed and the best fallback among what we record, but it neither replaces nor improves on Coinbase as the trigger.
+
+## Capital-constrained sizing (AWS tapes 09-16 17:35-24:00 and 09-17 00:00-02:45, 36 markets, `sim_*_capital.md`)
+
+Sim now reserves price x qty for resting bids and holds collateral against the NET position (offsetting pairs settle, as on Kalshi). Standing rules (join gate, greeks cap, explicit-shard latencies) throughout.
+
+| config | 09-16 $/mkt (c/ct, t) | 09-17 $/mkt (c/ct, t) | contracts/mkt |
+|---|---|---|---|
+| size 100 / max 200, unlimited | 22.7 (0.14, 2.9) | 25.6 (0.12, 2.8) | 16-22k |
+| size 5 / max 10, $5 (the live run) | 0.05 (0.01, 0.1) | -0.73 (-0.14, -0.8) | 400-500 |
+| size 10 / max 50, $100 | 3.56 (0.16, 1.5) | 4.38 (0.14, 1.5) | 2.2-3.1k |
+| size 20 / max 100, $100 | 8.07 (0.19, 1.7) | 7.89 (0.13, 1.5) | 4.2-6.0k |
+| size 20 / max 60, $150 | 3.22 (0.08, 1.1) | 5.67 (0.10, 1.6) | 3.9-5.6k |
+| size 50 / max 100, $300 | 9.96 (0.12, 2.3) | 11.61 (0.10, 2.4) | 8.4-11.8k |
+
+- $100 is not binding for size 10 / max 50 (identical to unlimited): the position rarely needs more than $50. $100 also carries size 20 / max 100 at ~$8/mkt.
+- size 5 / max 10 is ~zero in the sim as well: pinned at the cap, one-sided. Consistent with the live result.
+- Per-contract edge is flat across sizes (0.10-0.19c); P&L scales with contracts traded, i.e. with size, so capital buys throughput roughly linearly until the cap binds.
+- Live sizing with polled balance: Kalshi's balance is gross cash; free = balance - resting reservations - fills since the poll (conservative for closing fills).

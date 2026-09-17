@@ -138,9 +138,9 @@ func TestLedgerFillsAndPosition(t *testing.T) {
 	if pnl := l.MarkPnL(5000); pnl < 0.99 || pnl > 1.01 {
 		t.Fatalf("mark pnl %v", pnl)
 	}
-	// collateral paid: 40 YES at 50c ($20) + 100 NO at 49c ($49)
-	if c := l.CollateralUsed(); c < 68.99 || c > 69.01 {
-		t.Fatalf("collateral used %v, want 69", c)
+	// net short 60: the 40 YES/NO pairs are settled by the exchange; collateral held is 60 NO at 49c = $29.40
+	if c := l.CollateralUsed(); c < 29.39 || c > 29.41 {
+		t.Fatalf("collateral used %v, want 29.40", c)
 	}
 }
 

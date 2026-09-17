@@ -56,10 +56,12 @@ type Ledger struct {
 	working map[book.Side]*Order
 	pos     book.Qty
 	cash    float64 // dollars, signed (YES-sale convention: a NO fill at p credits 1-p)
-	paid    float64 // collateral actually paid for fills: YES fills at the YES price, NO fills at the NO price
-	fills   []Fill
-	seen    map[string]bool // fill ids applied
-	onEvent func(kind string, fields map[string]any)
+	// cost bases for the collateral held against the NET position (offsetting pairs are settled by the exchange)
+	yesQty, noQty   book.Qty
+	yesCost, noCost float64
+	fills           []Fill
+	seen            map[string]bool // fill ids applied
+	onEvent         func(kind string, fields map[string]any)
 }
 
 // NewLedger returns an empty ledger for ticker. onEvent (optional) receives
@@ -79,9 +81,9 @@ func (l *Ledger) Seed(pos book.Qty, mid book.Price) {
 	l.pos = pos
 	l.cash = -float64(pos) / 100 * float64(mid) / float64(book.OneDollar)
 	if pos > 0 {
-		l.paid = Collateral(mid, pos)
-	} else {
-		l.paid = Collateral(book.OneDollar-mid, -pos)
+		l.yesQty, l.yesCost = pos, Collateral(mid, pos)
+	} else if pos < 0 {
+		l.noQty, l.noCost = -pos, Collateral(book.OneDollar-mid, -pos)
 	}
 }
 
@@ -272,7 +274,13 @@ func (l *Ledger) OnFill(fillID string, f Fill) {
 	}
 	// a YES bid fill is +qty YES at price; a NO bid fill is -qty YES at (1 - price)
 	contracts := float64(f.Qty) / 100
-	l.paid += Collateral(f.Price, f.Qty)
+	if f.Side == book.Yes {
+		l.yesQty += f.Qty
+		l.yesCost += Collateral(f.Price, f.Qty)
+	} else {
+		l.noQty += f.Qty
+		l.noCost += Collateral(f.Price, f.Qty)
+	}
 	if f.Side == book.Yes {
 		l.pos += f.Qty
 		l.cash -= contracts * float64(f.Price) / 10000
@@ -284,11 +292,18 @@ func (l *Ledger) OnFill(fillID string, f Fill) {
 	l.onEvent("fill", map[string]any{"order_id": f.OrderID, "side": f.Side.String(), "price": f.Price.String(), "qty": f.Qty.String(), "pos": l.pos.String()})
 }
 
-// CollateralUsed is the dollars paid for the position so far (what Kalshi holds against it).
+// CollateralUsed is what Kalshi holds against the net position: the average
+// cost of the side we are net long (YES if pos > 0, NO if pos < 0).
 func (l *Ledger) CollateralUsed() float64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.paid
+	switch {
+	case l.pos > 0 && l.yesQty > 0:
+		return float64(l.pos) / float64(l.yesQty) * l.yesCost
+	case l.pos < 0 && l.noQty > 0:
+		return float64(-l.pos) / float64(l.noQty) * l.noCost
+	}
+	return 0
 }
 
 // MarkPnL is cash plus the position marked at mid ($).
