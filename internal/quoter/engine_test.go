@@ -360,3 +360,49 @@ func TestEngineRecoversPositionOnStart(t *testing.T) {
 	eng.OnFeedEvent(delta(tk, book.Yes, 5000, 100, 1))
 	waitFor(t, "one-sided quotes", func() bool { w := eng.Stats().Working; return len(w) == 1 && w["no"] != nil })
 }
+
+func TestEngineNeverOverSizesWhenEstimateGoesNegative(t *testing.T) {
+	tk := "KXBTC15M-TEST"
+	src := &fakeSource{books: map[string]*book.Book{tk: mkBook(7400, 300*100, 2500, 300*100)}}
+	ex := &fakeExec{}
+	eng := NewEngine(EngineConfig{
+		Params: Params{Size: 5 * 100, MaxPos: 50 * 100, StopBefore: 5 * time.Minute}, Limits: testLimits(), Mode: "live", Exec: ex, Feed: src,
+		Balance: func(context.Context) (float64, error) { return 3.0, nil }, // $3 free: at 74c that is 4 contracts, 2 per side
+		PickMarket: func(context.Context) (*Market, error) {
+			return &Market{Ticker: tk, Strike: 76000, CloseAt: time.Now().Add(10 * time.Minute)}, nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = eng.Run(ctx) }()
+	eng.OnFeedEvent(delta(tk, book.Yes, 7400, 100, 1))
+	waitFor(t, "sized quotes", func() bool { return len(eng.Stats().Working) == 2 })
+	y := eng.ledger.Working(book.Yes)
+	if y.Qty > 2*100 {
+		t.Fatalf("YES quote should be capped at 2 contracts by capital, got %v", y.Qty)
+	}
+	// the YES bid fills (74c x 2 = $1.48 spent since the poll); now free = 3 - NO reservation - 1.48 < 74c: no YES re-quote
+	eng.OnFeedEvent(feed.Event{Rx: time.Now(), Type: kalshi.TypeFill, Ticker: tk,
+		Fill: &kalshi.FillMsg{TradeID: "t1", OrderID: y.ID, MarketTicker: tk, YesPriceDollars: "0.7400", CountFP: "2.00"}})
+	waitFor(t, "fill", func() bool { return eng.Stats().Fills == 1 })
+	for i := 2; i < 8; i++ {
+		eng.OnFeedEvent(delta(tk, book.Yes, 7400, 100, int64(i)))
+		time.Sleep(15 * time.Millisecond)
+	}
+	s := eng.Stats()
+	for _, o := range ex.placed {
+		_ = o
+	}
+	if w := s.Working["yes"]; w != nil {
+		q := w.(map[string]any)["qty"].(string)
+		if q != "1.00" && q != "2.00" {
+			t.Fatalf("a re-quote must never exceed the budget: got yes qty %s", q)
+		}
+	}
+	if s.Vetoes["capital"] == 0 {
+		t.Fatalf("expected capital vetoes once the estimate ran out, got %v", s.Vetoes)
+	}
+	if s.Errors != 0 || s.Halted != "" {
+		t.Fatalf("errors %d halted %q", s.Errors, s.Halted)
+	}
+}
