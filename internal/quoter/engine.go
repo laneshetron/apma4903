@@ -291,6 +291,10 @@ func (e *Engine) rollMarket(ctx context.Context) {
 		fields["ticker"] = m.Ticker
 		e.tape(kind, fields)
 	})
+	// subscribe first so a recovered position can be marked at a real mid
+	if err := e.cfg.Feed.SetMarkets(ctx, []string{m.Ticker}); err != nil {
+		e.log.Error("subscribe market", "ticker", m.Ticker, "err", err)
+	}
 	if e.cfg.Recover != nil {
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		pos, err := e.cfg.Recover(rctx, m.Ticker)
@@ -298,15 +302,14 @@ func (e *Engine) rollMarket(ctx context.Context) {
 		if err != nil {
 			e.log.Error("recover position", "ticker", m.Ticker, "err", err)
 		} else if pos != 0 {
-			mid := book.Price(5000)
-			if bv, ok := e.cfg.Feed.Book(m.Ticker); ok {
-				if mm, ok := bv.Book.Top().Mid(); ok {
-					mid = mm
-				}
+			mid, ok := e.waitMid(ctx, m.Ticker, 5*time.Second)
+			if !ok {
+				e.log.Warn("no book to mark the recovered position; marking at 50c", "ticker", m.Ticker)
+				mid = 5000
 			}
 			ledger.Seed(pos, mid)
-			e.log.Warn("recovered position from a previous process", "ticker", m.Ticker, "pos", pos)
-			e.tape("recovered", map[string]any{"ticker": m.Ticker, "pos": pos.String()})
+			e.log.Warn("recovered position from a previous process", "ticker", m.Ticker, "pos", pos, "marked_at", mid)
+			e.tape("recovered", map[string]any{"ticker": m.Ticker, "pos": pos.String(), "mid": mid.String()})
 		}
 	}
 	e.mu.Lock()
@@ -315,11 +318,22 @@ func (e *Engine) rollMarket(ctx context.Context) {
 	e.strat = NewStrategy(e.cfg.Params)               // fresh cooldowns
 	e.lastBookRx, e.started = time.Time{}, time.Now() // the new market's book needs a moment to arrive
 	e.mu.Unlock()
-	if err := e.cfg.Feed.SetMarkets(ctx, []string{m.Ticker}); err != nil {
-		e.log.Error("subscribe market", "ticker", m.Ticker, "err", err)
-	}
 	e.log.Info("quoting", "ticker", m.Ticker, "strike", m.Strike, "close", m.CloseAt.Format(time.RFC3339))
 	e.tape("market", map[string]any{"ticker": m.Ticker, "strike": m.Strike, "close_at": m.CloseAt.UnixMilli()})
+}
+
+// waitMid polls the feed for a usable mid on ticker for up to d.
+func (e *Engine) waitMid(ctx context.Context, ticker string, d time.Duration) (book.Price, bool) {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		if bv, ok := e.cfg.Feed.Book(ticker); ok && !bv.Stale {
+			if mid, ok := bv.Book.Top().Mid(); ok {
+				return mid, true
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return 0, false
 }
 
 func (e *Engine) shutdownMarket(m *Market) {
