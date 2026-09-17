@@ -343,3 +343,12 @@ Sim now reserves price x qty for resting bids and holds collateral against the N
 - size 5 / max 10 is ~zero in the sim as well: pinned at the cap, one-sided. Consistent with the live result.
 - Per-contract edge is flat across sizes (0.10-0.19c); P&L scales with contracts traded, i.e. with size, so capital buys throughput roughly linearly until the cap binds.
 - Live sizing with polled balance: Kalshi's balance is gross cash; free = balance - resting reservations - fills since the poll (conservative for closing fills).
+
+## Inventory: caps, flatten at stop, A-S size skew (AWS tapes 09-16/09-17, 40 markets, `sim_*_{caps,flatten,flat,sizeskew}.md`)
+
+- The sim (and paper mode) never settled positions: end-of-market inventory was marked at the T-5min mid. Live carried +80 YES into a NO settlement on 2026-09-17 00:45 UTC (-$44 on $100). `flatten_at_stop` (take the touch at T-5, taker fee) costs ~$0.6/mkt at size 20 and is the missing step that makes live match what the sim assumed. Now on in the Go quoter.
+- Taking to flatten intra-market is ruinous (paying ~1c spread vs 0.2c edge): "take above 20" -$33..-$42/mkt. Takes are a backstop only.
+- Skewing PRICE (improving the reducing side) cannot be evaluated on the tape (fills at levels that did not exist); live-only.
+- Position cap sweep (size 20, $100, flatten): cap 100 $7.5/6.1 per mkt SD 23/18; cap 40 $2.9/4.7 SD 10/7.8; **cap 20 $3.2/2.6 SD 3.6/4.5 (t 4.5/2.2)**. Per-contract edge unchanged (0.10-0.15c): inventory adds variance, no return.
+- A-S by SIZE (increasing side size*(1-|q|/cap), reducing side size*(1+|q|/cap)): cap 40 + skew $5.1/4.5 per mkt, SD 7.7/7.1, t 3.3/2.5, avg max pos ~30; at the standing size $24.6/21.2 (from 22.7/17.3) with lower SD. Best mean per unit variance among the tested configs; cap 20 remains the lowest-variance.
+- Live config as of 2026-09-17 04:15 UTC: size 20 / max 20 / flatten at stop / $20 session stop. Candidate upgrade after a baseline: size 20 / max 40 + size skew.
