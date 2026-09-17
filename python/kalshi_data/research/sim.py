@@ -1031,6 +1031,18 @@ SIZESKEW = [
     Params("size 100 / max 200, flatten + size skew", **_I, size=100, max_pos=200, flatten_at_stop=True, size_skew=True),
 ]
 
+_Q = dict(signal_move=2.0, stop_before_s=300, join_theta=0.0, greeks_cap=0.05, size=20, max_pos=20, capital=100, flatten_at_stop=True)
+QUEUE = [
+    Params("live config, prorata queue, place 9 / cancel 5 / signal 11", **_Q, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
+    Params("live config, FIFO queue (cancels from behind), 9/5/11", **_Q, queue="pessimistic", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
+    Params("FIFO, 2/2/2 (no engine latency)", **_Q, queue="pessimistic", place_latency_ms=2, cancel_latency_ms=2, signal_latency_ms=2),
+    Params("FIFO, 5/3/8 (FIX-like)", **_Q, queue="pessimistic", place_latency_ms=5, cancel_latency_ms=3, signal_latency_ms=8),
+    Params("FIFO, 17/13/22 (auto-routed REST)", **_Q, queue="pessimistic", place_latency_ms=17, cancel_latency_ms=13, signal_latency_ms=22),
+    Params("FIFO, 9/5/11, cap 40 + size skew", **{**_Q, "max_pos": 40}, queue="pessimistic", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, size_skew=True),
+    Params("FIFO, 9/5/11, standing size 100 / max 200", **{**_Q, "size": 100, "max_pos": 200, "capital": None}, queue="pessimistic", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
+    Params("FIFO, 9/5/11, standing, no join gate/greeks", **{**_Q, "size": 100, "max_pos": 200, "capital": None, "join_theta": None, "greeks_cap": None}, queue="pessimistic", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
+]
+
 FLATTEN = [
     Params("live config (size 20 / max 100, $100), carry to settlement", **_I, size=20, max_pos=100, capital=100),
     Params("+ flatten at stop (take the touch)", **_I, size=20, max_pos=100, capital=100, flatten_at_stop=True),
@@ -1054,6 +1066,8 @@ PERMKT = [
 PROBE = [
     Params("probe prorata (2ms, cancel $2/1s, stop 5min, max pos 200)", **_F),
     Params("probe pessimistic", **_F, queue="pessimistic"),
+    Params("probe live config prorata 9/5/11", **_Q, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
+    Params("probe live config FIFO 9/5/11", **_Q, queue="pessimistic", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
 ]
 
 VALUE_OOS = [
@@ -1149,8 +1163,9 @@ def main() -> None:
     ap.add_argument("--flat", action="store_true", help="stay-flat policies: lean, tight cap, take to flatten (AWS tape)")
     ap.add_argument("--caps", action="store_true", help="position cap sweep with flatten at stop (AWS tape)")
     ap.add_argument("--sizeskew", action="store_true", help="A-S by quote size: shrink the increasing side, grow the reducing side (AWS tape)")
+    ap.add_argument("--queue", action="store_true", help="queue model (prorata vs FIFO) and latency under FIFO (AWS tape)")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]

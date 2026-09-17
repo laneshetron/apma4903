@@ -361,3 +361,14 @@ Sim now reserves price x qty for resting bids and holds collateral against the N
 | paper | 776 | 8,912 | +0.21c | +0.03 | +0.06 | **+0.03c** | +$2.8 |
 
 Spread capture is identical; adverse selection is 2x worse live (-0.41c vs -0.18c per contract). Split by whether our level was emptied within 300 ms of the fill: live fills are 36% full-sweep (mo30 -0.97c) vs paper 25% (-0.62c); partial-sweep fills earn +0.27c in both. Live gets more of the toxic full-sweep fills and they are more toxic: the paper queue model (pro-rata cancels ahead of us) advances our order too fast, so paper fills on partial sweeps that never reach us in reality. Fix the model to FIFO with cancels from behind (`queue="pessimistic"`) and re-base every P&L estimate on it before trading again.
+
+## Observed live queue positions vs the model (`queue_obs.py`, 994 live orders, 04:13-04:45 UTC)
+
+| | live | sim prorata (same config/day) | sim FIFO |
+|---|---|---|---|
+| orders filled at least partly | **48%** | 39% | 21% |
+| time to first fill p50 / p90 | 0.71 / 2.6 s | 0.78 / 2.4 s | 0.58 / 3.3 s |
+| ahead at placement p50 | 1,461 | 2,349 | 1,850 |
+| share of the level ahead that traded before our fill | p25 0.09, p50 0.44, p75 1.00 | — | — |
+
+Live orders advance through the queue at least as fast as the pro-rata model (half of our fills came after <44% of the level ahead had traded), so queue position is not the problem. The loss is in *when* we get filled: fills on orders younger than 0.5 s (44% of contracts) mark out -0.37..-0.74c; fills on orders older than 2 s mark out +0.44c; improving orders +1.81c (35 fills). Order lifetime p50 is 0.41 s: the quoter reprices ~2.5x/s and is therefore always among the newest orders at freshly formed levels, which are exactly the levels that get swept. The toxicity is a product of our own repricing churn, not of the queue model.
