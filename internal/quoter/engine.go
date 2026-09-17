@@ -73,7 +73,9 @@ type Engine struct {
 	reservedAtPoll    float64   // our working orders' collateral when the balance was polled
 	fillCostSincePoll float64   // collateral turned into position cost since the poll
 	started           time.Time // engine start, or the last market roll
-	closedPnL         float64   // mark P&L of finished markets this session (positions marked at the last mid)
+	closedPnL         float64   // paper: mark P&L of finished markets this session
+	startBalance      float64   // live: exchange balance at the first successful poll
+	haveStart         bool
 	seqGap            bool
 	halted            string
 	paused            string
@@ -229,7 +231,34 @@ func (e *Engine) refreshBalance(ctx context.Context) {
 	e.mu.Lock()
 	e.available, e.reservedAtPoll, e.fillCostSincePoll = b, reserved, 0
 	e.stats.Available = b
+	if !e.haveStart {
+		e.startBalance, e.haveStart = b, true
+		e.log.Info("session start balance", "balance", fmt.Sprintf("%.2f", b))
+	}
 	e.mu.Unlock()
+}
+
+// sessionPnL is the session's P&L for the loss limit. Live: the exchange's
+// balance change (settlements included) plus the current open position at
+// mid; paper: the sum of finished markets' marks plus the current mark.
+func (e *Engine) sessionPnL(l *Ledger, mid book.Price) float64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cfg.Balance != nil {
+		if !e.haveStart {
+			return 0
+		}
+		pos, _ := l.Position()
+		posValue := 0.0
+		if pos > 0 {
+			posValue = float64(pos) / 100 * float64(mid) / float64(book.OneDollar)
+		} else if pos < 0 {
+			posValue = float64(-pos) / 100 * float64(book.OneDollar-mid) / float64(book.OneDollar)
+		}
+		// cash spent on the open position is already out of the balance; add back what it is worth
+		return e.available - e.fillCostSincePoll - e.startBalance + posValue
+	}
+	return e.closedPnL + l.MarkPnL(mid)
 }
 
 // freeCollateral is the exchange balance less what our working orders reserve since the last poll,
@@ -503,10 +532,7 @@ func (e *Engine) onTick(ctx context.Context, now time.Time) {
 		}
 	}
 	pos, _ := l.Position()
-	e.mu.Lock()
-	closed := e.closedPnL
-	e.mu.Unlock()
-	h, p := e.risk.Check(now, pos, closed+l.MarkPnL(mid), bookAge, spotAge, gap)
+	h, p := e.risk.Check(now, pos, e.sessionPnL(l, mid), bookAge, spotAge, gap)
 	if h != "" && e.halted == "" {
 		e.halted = h
 		e.log.Error("HALT", "reason", h)
@@ -688,7 +714,9 @@ func (e *Engine) Stats() Stats {
 			}
 		}
 		s.MarkPnL = e.ledger.MarkPnL(mid)
-		s.SessionPnL = e.closedPnL + s.MarkPnL
+		e.mu.Unlock()
+		s.SessionPnL = e.sessionPnL(e.ledger, mid)
+		e.mu.Lock()
 		s.Fills = len(e.ledger.Fills())
 		views, _ := e.ledger.Views()
 		for side, v := range views {

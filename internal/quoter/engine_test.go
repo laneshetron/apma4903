@@ -461,3 +461,34 @@ func TestEngineLossLimitIsCumulativeAcrossMarkets(t *testing.T) {
 	eng.OnFeedEvent(delta(b, book.Yes, 5000, -100, 4))
 	waitFor(t, "session halt", func() bool { return eng.Stats().Halted != "" })
 }
+
+func TestEngineLiveSessionLossUsesExchangeBalance(t *testing.T) {
+	tk := "KXBTC15M-TEST"
+	src := &fakeSource{books: map[string]*book.Book{tk: mkBook(5000, 100, 4900, 100)}}
+	var mu sync.Mutex
+	bal := 100.0
+	lim := testLimits()
+	lim.MaxLoss = 20
+	eng := NewEngine(EngineConfig{
+		Params: Params{Size: 5 * 100, MaxPos: 50 * 100, StopBefore: 5 * time.Minute}, Limits: lim, Mode: "live", Exec: &fakeExec{}, Feed: src,
+		Balance: func(context.Context) (float64, error) { mu.Lock(); defer mu.Unlock(); return bal, nil },
+		PickMarket: func(context.Context) (*Market, error) {
+			return &Market{Ticker: tk, Strike: 76000, CloseAt: time.Now().Add(10 * time.Minute)}, nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = eng.Run(ctx) }()
+	waitFor(t, "start balance", func() bool { return eng.Stats().Available == 100 })
+	// a settlement elsewhere took $30 out of the account: the exchange balance is the truth, no marks involved
+	mu.Lock()
+	bal = 70
+	mu.Unlock()
+	deadline := time.Now().Add(8 * time.Second) // next poll is within 5s
+	for time.Now().Before(deadline) && eng.Stats().Halted == "" {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if s := eng.Stats(); s.Halted == "" || s.SessionPnL > -29.9 {
+		t.Fatalf("balance drop of $30 should halt at a $20 limit, got %+v", s)
+	}
+}
