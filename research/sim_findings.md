@@ -372,3 +372,16 @@ Spread capture is identical; adverse selection is 2x worse live (-0.41c vs -0.18
 | share of the level ahead that traded before our fill | p25 0.09, p50 0.44, p75 1.00 | — | — |
 
 Live orders advance through the queue at least as fast as the pro-rata model (half of our fills came after <44% of the level ahead had traded), so queue position is not the problem. The loss is in *when* we get filled: fills on orders younger than 0.5 s (44% of contracts) mark out -0.37..-0.74c; fills on orders older than 2 s mark out +0.44c; improving orders +1.81c (35 fills). Order lifetime p50 is 0.41 s: the quoter reprices ~2.5x/s and is therefore always among the newest orders at freshly formed levels, which are exactly the levels that get swept. The toxicity is a product of our own repricing churn, not of the queue model.
+
+## Price-priority fills: the tape can see most of the "invisible" demand (`sim_*_priority.md`)
+
+A taker that trades at a worse price after clearing our level would, by price priority, have filled our resting order first. The sim only filled from trades AT our price, so it credited us with surviving multi-level sweeps (33% of volume, the informed class). With `price_priority=True`:
+
+| config | 09-17 $/mkt (old model) | 09-17 (priority) | 09-16 (old) | 09-16 (priority) |
+|---|---|---|---|---|
+| live config (20/20, $100), prorata 9/5/11 | +2.13 | **-0.50** | +3.24 | **+0.59** |
+| live config, FIFO + priority | — | -4.21 | — | -0.48 |
+| standing 100/200, prorata 9/5/11 | +24.65 (FIFO) | **-8.69** | +2.49 | +6.39 |
+| standing 100/200, 2/2/2 | — | +23.87 | — | +26.52 |
+
+On the two markets traded live (00:30, 00:45 UTC): FIFO + priority gives -$14.5 on 514 fills / 6,380 contracts vs live -$15.5 on 567 fills / 8,491 — the corrected model reproduces the live loss. Conclusion: at the measured ~9 ms placement latency, touch-joining as configured has no edge; the earlier positive estimates were the artefact of ignoring sweeps that went through our level. Only the 2 ms rows remain positive (~$24-27/mkt at the standing size), i.e. the edge exists only at the very front of the queue.

@@ -58,6 +58,7 @@ class Params:
     flatten_at_stop: bool = False            # at the endgame stop, cross the spread to close the position (taker fee) instead of carrying it to settlement
     flatten_above: int | None = None         # contracts: whenever |position| exceeds this, take the touch to bring it back to this (taker fee)
     size_skew: bool = False                  # A-S by size: increasing side quotes size*(1-|q|/max), reducing side size*(1+|q|/max)
+    price_priority: bool = False             # a trade at a worse price for the taker fills our better-priced resting order first (multi-level sweeps)
     signal_venues: tuple = ("coinbase",)     # venues whose 1s mid move can trigger cancel-on-signal
     stale_feed_ms: float | None = None       # pull quotes while the latest Coinbase message arrived this late (rx - exchange ts)
     stop_before_s: float = 120.0
@@ -284,6 +285,12 @@ class Quoter:
         if self.p.cluster_ms is not None and book.side(side).get(price, 0) == 0:
             self.swept_until[tk][side] = rx + int(self.p.cluster_ms * 1e6)  # level emptied by this sweep
         o = self.orders[tk].get(side)
+        if self.p.price_priority and o is not None and o.ahead is not None and self._live(o, rx) and o.price > price and o.remaining > 0:
+            # the taker traded through our level: by price priority our order fills before anything at the worse price
+            self.vetoes["priority_fills"] += 1
+            o.ahead = 0
+            self._fill(tk, o, qty, rx)
+            return
         if o is None or o.price != price or o.ahead is None or not self._live(o, rx):
             return
         # this trade explains the matching negative delta(s)
@@ -1032,6 +1039,14 @@ SIZESKEW = [
 ]
 
 _Q = dict(signal_move=2.0, stop_before_s=300, join_theta=0.0, greeks_cap=0.05, size=20, max_pos=20, capital=100, flatten_at_stop=True)
+PRIORITY = [
+    Params("live config, prorata, 9/5/11 (old model)", **_Q, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
+    Params("live config, prorata + price priority", **_Q, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, price_priority=True),
+    Params("live config, FIFO + price priority", **_Q, queue="pessimistic", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, price_priority=True),
+    Params("standing 100/200, prorata + price priority", **{**_Q, "size": 100, "max_pos": 200, "capital": None}, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, price_priority=True),
+    Params("standing 100/200, prorata + price priority, 2/2/2", **{**_Q, "size": 100, "max_pos": 200, "capital": None}, queue="prorata", place_latency_ms=2, cancel_latency_ms=2, signal_latency_ms=2, price_priority=True),
+]
+
 QUEUE = [
     Params("live config, prorata queue, place 9 / cancel 5 / signal 11", **_Q, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
     Params("live config, FIFO queue (cancels from behind), 9/5/11", **_Q, queue="pessimistic", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
@@ -1164,8 +1179,9 @@ def main() -> None:
     ap.add_argument("--caps", action="store_true", help="position cap sweep with flatten at stop (AWS tape)")
     ap.add_argument("--sizeskew", action="store_true", help="A-S by quote size: shrink the increasing side, grow the reducing side (AWS tape)")
     ap.add_argument("--queue", action="store_true", help="queue model (prorata vs FIFO) and latency under FIFO (AWS tape)")
+    ap.add_argument("--priority", action="store_true", help="price-priority fills from multi-level sweeps (AWS tape)")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
