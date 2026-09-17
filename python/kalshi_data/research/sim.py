@@ -37,7 +37,12 @@ from .fair import SpotSeries, fair_value
 from .markouts import FastBook, close_time
 
 ONE = 10_000
-TICK = 100          # 1c
+TICK = 100          # 1c (used where a fixed reference is needed)
+
+
+def tick_at(price: int) -> int:
+    """KXBTC15M price grid (tapered_deci_cent): 0.1c steps below 10c and above 90c, 1c between."""
+    return 10 if price < 1_000 or price >= 9_000 else 100
 QTY = 100           # 1 contract
 TAKER_FEE = 0.07    # per contract: 0.07 * p * (1-p) dollars
 
@@ -59,6 +64,11 @@ class Params:
     flatten_above: int | None = None         # contracts: whenever |position| exceeds this, take the touch to bring it back to this (taker fee)
     size_skew: bool = False                  # A-S by size: increasing side quotes size*(1-|q|/max), reducing side size*(1+|q|/max)
     price_priority: bool = False             # a trade at a worse price for the taker fills our better-priced resting order first (multi-level sweeps)
+    engine_lag_ms: float = 0.0               # tape time - engine time (AWS tape: ~6 ms); added to place/cancel latencies so they are in tape time
+    min_level_age_ms: float | None = None    # don't JOIN a touch level younger than this (time since the level appeared)
+    min_rest_ms: float | None = None         # don't reprice an order younger than this (cancels for disallow/signal still apply)
+    reprice_ticks: int = 1                   # reprice only when the wanted price is at least this many ticks from the order's price
+    offset_ticks: int = 0                    # rest this many ticks behind the touch (pre-positioning); disables improving
     signal_venues: tuple = ("coinbase",)     # venues whose 1s mid move can trigger cancel-on-signal
     stale_feed_ms: float | None = None       # pull quotes while the latest Coinbase message arrived this late (rx - exchange ts)
     stop_before_s: float = 120.0
@@ -120,6 +130,8 @@ class MarketPnL:
     sell_proceeds: float = 0.0
     no_paid: float = 0.0    # dollars paid for NO fills (a NO bid at p locks p per contract)
     flattened: float = 0.0  # contracts closed at the stop by taking the touch
+    settle: float | None = None   # 1.0 / 0.0 once the market resolves (BRTI 60s average vs strike), None if unknown
+    mid_at_stop: float | None = None
 
     def locked(self) -> float:
         """Collateral held against the NET position: Kalshi returns the collateral of offsetting pairs."""
@@ -142,8 +154,8 @@ class Quoter:
 
     def __init__(self, p: Params):
         self.p = p
-        self.lat = int((p.cancel_latency_ms if p.cancel_latency_ms is not None else p.latency_ms) * 1e6)
-        self.lat_place = int((p.place_latency_ms if p.place_latency_ms is not None else p.latency_ms) * 1e6)
+        self.lat = int(((p.cancel_latency_ms if p.cancel_latency_ms is not None else p.latency_ms) + p.engine_lag_ms) * 1e6)
+        self.lat_place = int(((p.place_latency_ms if p.place_latency_ms is not None else p.latency_ms) + p.engine_lag_ms) * 1e6)
         self.lat_signal = int((p.signal_latency_ms if p.signal_latency_ms is not None else p.latency_ms) * 1e6)
         self.orders: dict[str, dict[str, Order]] = defaultdict(dict)   # ticker -> side -> Order
         self.pnl: dict[str, MarketPnL] = {}
@@ -153,6 +165,7 @@ class Quoter:
         self.vetoes: dict[str, int] = defaultdict(int)  # reason -> count of (side, requote) decisions blocked
         self.feed_lag_ms = 0.0   # delivery lag of the latest Coinbase message
         self.adverse_since: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": -1, "no": -1})
+        self.level_born: dict[str, dict[tuple, int]] = defaultdict(dict)   # ticker -> (side, price) -> rx_ns the level appeared
         self.probe_adv_qty = 0.0     # contracts by which live orders advanced
         self.probe_live_s = 0.0      # live-order seconds
         self.probe_ttf: list[float] = []      # seconds from activation to (first) fill
@@ -255,6 +268,10 @@ class Quoter:
         if mid is not None:
             r.last_mid = mid
         self.resolve_markouts(tk, rx, book)
+        if before == 0 and after > 0:
+            self.level_born[tk][(side, price)] = rx
+        elif after == 0:
+            self.level_born[tk].pop((side, price), None)
         o = self.orders[tk].get(side)
         if o is not None and o.price == price:
             if o.ahead is None and rx >= o.active_from:
@@ -390,7 +407,8 @@ class Quoter:
                             r.cash -= n * (px + TAKER_FEE * px * (1 - px))
                         r.flattened = n
                         r.pos = 0
-                    r.mark_pnl = r.cash + r.pos / QTY * mid / 100
+                    r.mid_at_stop = mid
+                    r.mark_pnl = r.cash + r.pos / QTY * mid / 100   # provisional; replaced by settlement in resolve()
             for o in orders.values():
                 if o.cancel_at is None:
                     o.cancel_at = rx + self.lat
@@ -411,9 +429,11 @@ class Quoter:
             r.flattened += excess
             self.vetoes["taken"] += 1
         spread = (ONE - book.best_no) - book.best_yes
+        tick = {"yes": tick_at(book.best_yes), "no": tick_at(book.best_no)}
+        improve = {s: (self.p.offset_ticks == 0 and spread > tick[s]) for s in ("yes", "no")}
         want = {
-            "yes": book.best_yes + (TICK if spread > TICK else 0),
-            "no": book.best_no + (TICK if spread > TICK else 0),
+            "yes": book.best_yes + (tick["yes"] if improve["yes"] else 0) - self.p.offset_ticks * tick["yes"],
+            "no": book.best_no + (tick["no"] if improve["no"] else 0) - self.p.offset_ticks * tick["no"],
         }
         pos = r.pos
         lim = self.p.max_pos * QTY - self.p.size * QTY
@@ -430,8 +450,8 @@ class Quoter:
         skewed = {"yes": False, "no": False}
         if p.skew_at is not None and abs(pos) >= p.skew_at * p.max_pos * QTY:
             for s in ("yes", "no"):
-                if reducing[s] and spread <= TICK and want[s] + TICK < ONE - TICK:
-                    want[s] += TICK    # lean: improve the reducing side by a tick
+                if reducing[s] and spread <= tick[s] and want[s] + tick[s] < ONE - tick[s]:
+                    want[s] += tick[s]    # lean: improve the reducing side by a tick
                     skewed[s] = True
         if p.stale_feed_ms is not None and self.feed_lag_ms > p.stale_feed_ms:
             allow = {"yes": False, "no": False}
@@ -446,7 +466,7 @@ class Quoter:
         depth = {"yes": book.yes.get(book.best_yes, 0), "no": book.no.get(book.best_no, 0)}
         for s in ("yes", "no"):
             other = "no" if s == "yes" else "yes"
-            if p.min_depth is not None and spread <= TICK and depth[s] < p.min_depth * QTY and allow[s]:
+            if p.min_depth is not None and spread <= tick[s] and depth[s] < p.min_depth * QTY and allow[s]:
                 allow[s] = False
                 self.vetoes["thin"] += 1
             if p.imb_thr is not None and allow[s] and depth[s] + depth[other] > 0 and \
@@ -497,8 +517,13 @@ class Quoter:
                     and (s == "yes" and pos <= lim or s == "no" and pos >= -lim):
                 ok = True   # near the front: fills here are the benign partials; keep the position
                 self.vetoes["kept_front"] += 1
-            if o is not None and o.cancel_at is None and (not ok or o.price != want[s]):
-                o.cancel_at = rx + self.lat
+            if o is not None and o.cancel_at is None:
+                off = abs(o.price - want[s]) >= p.reprice_ticks * tick[s] if o.price != want[s] else False
+                young = p.min_rest_ms is not None and rx - o.active_from < p.min_rest_ms * 1e6
+                if not ok or (off and not young):
+                    o.cancel_at = rx + self.lat
+                elif off and young:
+                    self.vetoes["held_young"] += 1
             if ok and (o is None or o.cancel_at is not None) and not any(
                 x.side == s and x.cancel_at is None for x in orders.values()
             ):
@@ -506,10 +531,15 @@ class Quoter:
                         (s == "yes" and gap < -p.fair_gap_join) or (s == "no" and gap > p.fair_gap_join)):
                     self.vetoes["fair_join"] += 1
                     continue
+                if p.min_level_age_ms is not None and not improve[s]:
+                    born = self.level_born[tk].get((s, want[s]))
+                    if born is not None and rx - born < p.min_level_age_ms * 1e6:
+                        self.vetoes["young_level"] += 1
+                        continue
                 if p.join_theta is not None and ctx is not None and ctx.edge_model is not None and not (p.reduce_only_exempt and reducing[s]):
                     other = "no" if s == "yes" else "yes"
                     imb = (depth[other] - depth[s]) / (depth[other] + depth[s]) if depth[other] + depth[s] > 0 else 0.0
-                    q_join = 0.0 if spread > TICK else depth[s] / QTY
+                    q_join = 0.0 if improve[s] else depth[s] / QTY
                     e = ctx.edge_model.edge(s, imb, ctx.micro_unsigned(), (close_ns - rx) / 6e10, q_join)
                     if e is not None and e < -p.join_theta:
                         self.vetoes["join"] += 1
@@ -537,9 +567,18 @@ class Quoter:
                         if size < QTY:
                             self.vetoes["capital"] += 1
                             continue
-                    orders[s] = Order(s, want[s], size, None, rx + self.lat_place, improved=spread > TICK or skewed[s])
+                    orders[s] = Order(s, want[s], size, None, rx + self.lat_place, improved=improve[s] or skewed[s])
                     if p.dfair_cancel_c is not None and ctx is not None:
                         orders[s].fair_at_place = ctx.fair_c(tk, rx, close_ns, p.fair_spot, p.vol_mult, p.kernel)
+
+    def resolve(self, settles: dict[str, float]) -> None:
+        """Mark positions carried past the stop at the settlement value instead of the stop-time mid."""
+        for tk, r in self.pnl.items():
+            v = settles.get(tk)
+            if v is None or r.mark_pnl is None or r.pos == 0:
+                continue
+            r.settle = v
+            r.mark_pnl = r.cash + r.pos / QTY * v
 
     # ---- summary ---------------------------------------------------------------
     def summary(self, test_from_ns: int = 0) -> dict:
@@ -772,10 +811,10 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
     alpha_model = fit_alpha(alpha_parquet) if (alpha_parquet and any(p.alpha_thr is not None for p in configs)) else None
     test_from = alpha_model[3] if alpha_model else 0
     strikes: dict[str, float] = {}
-    if need_fair or any(p.greeks_cap is not None for p in configs):
-        tickers = sorted({r.raw["msg"]["market_ticker"] for r in iter_records(data_dir, day)
-                          if r.raw.get("type") == "orderbook_snapshot" and r.raw["msg"]["market_ticker"].startswith(series + "-")})
-        strikes = fetch_strikes(tickers)
+    tickers = sorted({r.raw["msg"]["market_ticker"] for r in iter_records(data_dir, day)
+                      if r.raw.get("type") == "orderbook_snapshot" and r.raw["msg"]["market_ticker"].startswith(series + "-")})
+    strikes = fetch_strikes(tickers)   # needed for settlement of carried positions (and greeks / fair value)
+    avg60: list[tuple[int, float]] = []   # (window_end_ms, BRTI 60s average) from the 1/s channel
     spot = SpotState()
     edge_model = EdgeModel(alpha_parquet, train_frac=train_frac) if (alpha_parquet and any(p.edge_theta is not None or p.join_theta is not None for p in configs)) else None
     if edge_model is not None and not test_from:
@@ -845,6 +884,11 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
                     q.on_tick(live, rx, mid, ago, ctx)
             continue
         raw = rec.raw
+        if raw.get("type") == "cfbenchmarks_value" and raw["msg"].get("index_id") == "BRTI":
+            a = raw["msg"].get("avg_60s_data")
+            if a:
+                avg60.append((int(a["window_end_ts_exclusive"]), float(a["value"])))
+            continue
         if raw.get("type") == "cfbenchmarks_value_5hz" and raw["msg"].get("index_id") == "BRTI":
             v = float(json.loads(raw["msg"]["data"])["value"])
             spot.on_brti(rx, v)
@@ -889,6 +933,21 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
             continue
         for q in quoters:
             q.on_delta(tk, rx, msg.get("ts_ms", 0), side, price, before, before + d, b, closes[tk], ctx)
+    # settlement: YES iff the 60s average ending at the close is above the strike
+    settles: dict[str, float] = {}
+    ends = [e for e, _ in avg60]
+    import bisect as _bisect
+    for tk, close_ns in closes.items():
+        K = strikes.get(tk)
+        if not K or not avg60:
+            continue
+        close_ms = close_ns // 1_000_000
+        i = _bisect.bisect_right(ends, close_ms) - 1
+        if i >= 0 and close_ms - ends[i] <= 2_000:
+            settles[tk] = 1.0 if avg60[i][1] > K else 0.0
+    for q in quoters:
+        q.resolve(settles)
+    print(f"settled {len(settles)} of {len(closes)} markets from the recorded BRTI 60s average", file=sys.stderr)
     return [q.summary(test_from) for q in quoters], test_from
 
 
@@ -1039,6 +1098,25 @@ SIZESKEW = [
 ]
 
 _Q = dict(signal_move=2.0, stop_before_s=300, join_theta=0.0, greeks_cap=0.05, size=20, max_pos=20, capital=100, flatten_at_stop=True)
+# Corrected model: price-priority fills, engine lag in tape time, tapered ticks, settlement. Explicit-shard REST latencies.
+_M2 = dict(signal_move=2.0, stop_before_s=300, join_theta=0.0, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
+           place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11)
+EVAL = [
+    Params("live 20/20 $100 flatten (baseline)", **_M2, size=20, max_pos=20, capital=100, flatten_at_stop=True),
+    Params("live 20/20, carry to settlement", **_M2, size=20, max_pos=20, capital=100),
+    Params("A1 persistence: min rest 1s, reprice >= 2 ticks", **_M2, size=20, max_pos=20, capital=100, flatten_at_stop=True, min_rest_ms=1000, reprice_ticks=2),
+    Params("A2 join gate: level age >= 1s", **_M2, size=20, max_pos=20, capital=100, flatten_at_stop=True, min_level_age_ms=1000),
+    Params("A3 join gate: level age >= 1s + min depth 300", **_M2, size=20, max_pos=20, capital=100, flatten_at_stop=True, min_level_age_ms=1000, min_depth=300),
+    Params("A4 persistence + level age 1s + depth 300", **_M2, size=20, max_pos=20, capital=100, flatten_at_stop=True, min_rest_ms=1000, reprice_ticks=2, min_level_age_ms=1000, min_depth=300),
+    Params("C  pre-position 1 tick behind the touch", **_M2, size=20, max_pos=20, capital=100, flatten_at_stop=True, offset_ticks=1),
+    Params("C2 pre-position 1 tick + persistence", **_M2, size=20, max_pos=20, capital=100, flatten_at_stop=True, offset_ticks=1, min_rest_ms=1000, reprice_ticks=2),
+    Params("D  cap 40 + size skew + flatten", **_M2, size=20, max_pos=40, capital=100, flatten_at_stop=True, size_skew=True),
+    Params("D2 cap 40 + size skew + A4", **_M2, size=20, max_pos=40, capital=100, flatten_at_stop=True, size_skew=True, min_rest_ms=1000, reprice_ticks=2, min_level_age_ms=1000, min_depth=300),
+    Params("standing 100/200 flatten", **_M2, size=100, max_pos=200, flatten_at_stop=True),
+    Params("standing 100/200 + A4", **_M2, size=100, max_pos=200, flatten_at_stop=True, min_rest_ms=1000, reprice_ticks=2, min_level_age_ms=1000, min_depth=300),
+    Params("standing, no gates, flatten (raw touch quoter)", **{**_M2, "join_theta": None, "greeks_cap": None}, size=100, max_pos=200, flatten_at_stop=True),
+]
+
 PRIORITY = [
     Params("live config, prorata, 9/5/11 (old model)", **_Q, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11),
     Params("live config, prorata + price priority", **_Q, queue="prorata", place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, price_priority=True),
@@ -1180,8 +1258,9 @@ def main() -> None:
     ap.add_argument("--sizeskew", action="store_true", help="A-S by quote size: shrink the increasing side, grow the reducing side (AWS tape)")
     ap.add_argument("--queue", action="store_true", help="queue model (prorata vs FIFO) and latency under FIFO (AWS tape)")
     ap.add_argument("--priority", action="store_true", help="price-priority fills from multi-level sweeps (AWS tape)")
+    ap.add_argument("--eval", action="store_true", help="post-audit evaluation set under the corrected model (AWS tape)")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
