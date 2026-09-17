@@ -76,6 +76,7 @@ type Engine struct {
 	closedPnL         float64   // paper: mark P&L of finished markets this session
 	startBalance      float64   // live: exchange balance at the first successful poll
 	haveStart         bool
+	posAtPoll         book.Qty  // our position when the balance was polled (equity needs a consistent snapshot)
 	seqGap            bool
 	halted            string
 	paused            string
@@ -220,6 +221,7 @@ func (e *Engine) refreshBalance(ctx context.Context) {
 		return
 	}
 	reserved := 0.0
+	var posNow book.Qty
 	e.mu.Lock()
 	l := e.ledger
 	e.mu.Unlock()
@@ -227,9 +229,10 @@ func (e *Engine) refreshBalance(ctx context.Context) {
 		for _, o := range l.WorkingOrders() {
 			reserved += Collateral(o.Price, o.Qty-o.Filled)
 		}
+		posNow, _ = l.Position()
 	}
 	e.mu.Lock()
-	e.available, e.reservedAtPoll, e.fillCostSincePoll = b, reserved, 0
+	e.available, e.reservedAtPoll, e.fillCostSincePoll, e.posAtPoll = b, reserved, 0, posNow
 	e.stats.Available = b
 	if !e.haveStart {
 		e.startBalance, e.haveStart = b, true
@@ -248,7 +251,7 @@ func (e *Engine) sessionPnL(l *Ledger, mid book.Price) float64 {
 		if !e.haveStart {
 			return 0
 		}
-		pos, _ := l.Position()
+		pos := e.posAtPoll // same instant as the balance; a fresher position would double-count fills the balance has not seen
 		posValue := 0.0
 		if pos > 0 {
 			posValue = float64(pos) / 100 * float64(mid) / float64(book.OneDollar)
