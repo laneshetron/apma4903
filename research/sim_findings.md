@@ -469,3 +469,25 @@ Paper (price priority + tapered tick, live config size 20 / cap 20 / $100) resta
 Per market within a few dollars of each other (corr 0.40 on n = 5). After the halt fix, 11 markets by 16:00 UTC: paper −$16.8 vs sim −$28.1, fills 2,285 vs 2,489, contracts 24,502 vs 25,637, per-market corr **0.81**, sweep share paper 18–49% vs sim 8–43% (paper consistently a few points higher). The paper executor now reproduces the corrected sim's volume, sweep share and loss; the old paper on the same day had traded 4x the sim's volume at +$289 where the sim said −$38. Both are still losing at the live baseline configuration — as the sim says they should.
 
 **Bug found by the corrected paper (would have hit live):** halt `position 28.10 beyond limit`. Sequence: YES 20 pending-cancel; a trade that beat the cancel at the engine fills it (reported after the cancel ack); the strategy, seeing the stale position, places a new YES 20 which is swept 8 ms later → +28.1 vs cap 20. Live has the same race: Kalshi's cancel response carries `reduced_by`, and the fill channel reports the pre-cancel fill ~7 ms later. Fix (`8b3654d`): `Cancel` returns `reduced_by`; a cancelled order whose remainder exceeds `reduced_by` stays pending-cancel until those fills land, so the side cannot be re-quoted on a stale position; the paper executor waits out `FeedLag` before answering a cancel so its `reduced_by` is honest.
+
+### Depth 1000 — size sweep and time of day (`--sizes`; 81 markets = 09-16 17:00 → 09-17 16:00 UTC, one continuous stretch)
+
+| size / cap | pro-rata $/mkt (t) | win | pessimistic $/mkt | worst mkt (pro-rata) |
+|---|---|---|---|---|
+| 5 | +0.50 (3.7) | 72% | +0.01 | −2.9 |
+| 10 | +0.92 (3.7) | 72% | −0.00 | −5.1 |
+| 20 | +1.65 (3.4) | 67% | −0.29 | −13.7 |
+| 50 | +3.90 (3.5) | 72% | +0.07 | −22.3 |
+| 100 | +8.98 (4.2) | 74% | −0.89 | −63.7 |
+| 200, unlimited capital | +13.69 (3.7) | 72% | +1.22 | −74.9 |
+| 500, unlimited capital | +23.47 (2.5) | 64% | −2.96 | −281.9 |
+| 50 / cap 100 | +7.33 (2.9) | 72% | +1.03 | −62.5 |
+| 100 / cap 200 | +17.12 (3.6) | 75% | +1.34 | −120.5 |
+
+Pro-rata: linear at ~$0.085/market per contract of quote size through 200, sub-linear by 500; the t-stat is size-independent (P&L and noise scale together); the worst market grows faster than the mean. Pessimistic: ≈ 0 at every size. Cap 2× size nearly doubles the edge at the same quote size (and the worst market). No market impact is modelled — above ~100 lots the numbers are optimistic regardless.
+
+Hourly: the whole drag is one 3-hour stretch, 09:00–12:00 UTC on 09-17 (right after Kalshi's maintenance window, market volume half of normal): −$37 over 12 markets (−3.09/mkt), against +$2.29/mkt over the other 44 markets that day and 67–88% winners in every other 4-hour block. The baseline lost there too (−4.87/mkt vs −1.82 elsewhere), so it is a bad stretch for the strategy, not the gate. One occurrence — watch the next post-maintenance hours before making it a rule.
+
+### Paper under `-min-depth 1000` vs the sim (from 16:22 UTC, `paper_vs_sim --config "depth 1000 only"`)
+
+First 6 markets (12:30–13:45 ET): paper +$17.0 vs sim +$5.5; fills 590 vs 542; contracts 7,932 vs 7,907; sweep share 12–34% vs 1–30%. Volume matches to 1% — the gate engages on live books the way the sim says. The P&L gap is one market (13:45: paper +3.6 vs sim −8.1; the market ran to 5¢ and paper's endgame flatten covered 14 lots there) — n = 6, per-market SD ≈ $4. Paper's fill count is pro-rata by construction, so this confirms engagement and sweep share, not queue advancement.
