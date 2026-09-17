@@ -57,6 +57,7 @@ class Params:
     skew_at: float | None = None             # fraction of max_pos beyond which the reducing side improves a tick and the increasing side shrinks
     flatten_at_stop: bool = False            # at the endgame stop, cross the spread to close the position (taker fee) instead of carrying it to settlement
     flatten_above: int | None = None         # contracts: whenever |position| exceeds this, take the touch to bring it back to this (taker fee)
+    size_skew: bool = False                  # A-S by size: increasing side quotes size*(1-|q|/max), reducing side size*(1+|q|/max)
     signal_venues: tuple = ("coinbase",)     # venues whose 1s mid move can trigger cancel-on-signal
     stale_feed_ms: float | None = None       # pull quotes while the latest Coinbase message arrived this late (rx - exchange ts)
     stop_before_s: float = 120.0
@@ -509,6 +510,13 @@ class Quoter:
                 # place: becomes live after latency; replaces a cancelled order once it lands
                 if o is None or rx >= o.cancel_at:
                     size = self.p.size * QTY
+                    if p.size_skew and pos != 0:
+                        frac = min(1.0, abs(pos) / (p.max_pos * QTY))
+                        mult = (1 + frac) if reducing[s] else (1 - frac)
+                        size = max(0, int(round(self.p.size * mult))) * QTY
+                        if size < QTY:
+                            self.vetoes["size_skew"] += 1
+                            continue
                     if p.skew_at is not None and not reducing[s] and abs(pos) >= p.skew_at * p.max_pos * QTY:
                         frac = max(0.0, 1 - (abs(pos) / QTY - p.skew_at * p.max_pos) / ((1 - p.skew_at) * p.max_pos))
                         size = max(QTY, int(self.p.size * frac) * QTY)   # increasing side shrinks toward 1 lot at the cap
@@ -518,7 +526,7 @@ class Quoter:
                         other_needs = 1 if (allow[("no" if s == "yes" else "yes")] and ("no" if s == "yes" else "yes") not in orders) else 0
                         budget = free / (1 + other_needs)
                         afford = int(budget / (want[s] / ONE)) if want[s] > 0 else 0
-                        size = min(self.p.size, max(0, afford)) * QTY
+                        size = min(size // QTY, max(0, afford)) * QTY   # capital caps the (possibly skewed) size
                         if size < QTY:
                             self.vetoes["capital"] += 1
                             continue
@@ -1013,6 +1021,16 @@ CAPS = [
     Params("size 100 / max 100, flatten", **_I, size=100, max_pos=100, flatten_at_stop=True),
 ]
 
+SIZESKEW = [
+    Params("size 20 / max 20, flatten (live)", **_I, size=20, max_pos=20, capital=100, flatten_at_stop=True),
+    Params("size 20 / max 40, flatten", **_I, size=20, max_pos=40, capital=100, flatten_at_stop=True),
+    Params("size 20 / max 40, flatten + size skew", **_I, size=20, max_pos=40, capital=100, flatten_at_stop=True, size_skew=True),
+    Params("size 20 / max 60, flatten + size skew", **_I, size=20, max_pos=60, capital=100, flatten_at_stop=True, size_skew=True),
+    Params("size 20 / max 100, flatten + size skew", **_I, size=20, max_pos=100, capital=100, flatten_at_stop=True, size_skew=True),
+    Params("size 10 / max 40, flatten + size skew", **_I, size=10, max_pos=40, capital=100, flatten_at_stop=True, size_skew=True),
+    Params("size 100 / max 200, flatten + size skew", **_I, size=100, max_pos=200, flatten_at_stop=True, size_skew=True),
+]
+
 FLATTEN = [
     Params("live config (size 20 / max 100, $100), carry to settlement", **_I, size=20, max_pos=100, capital=100),
     Params("+ flatten at stop (take the touch)", **_I, size=20, max_pos=100, capital=100, flatten_at_stop=True),
@@ -1130,8 +1148,9 @@ def main() -> None:
     ap.add_argument("--flatten", action="store_true", help="flatten at the endgame stop vs carry to settlement (AWS tape)")
     ap.add_argument("--flat", action="store_true", help="stay-flat policies: lean, tight cap, take to flatten (AWS tape)")
     ap.add_argument("--caps", action="store_true", help="position cap sweep with flatten at stop (AWS tape)")
+    ap.add_argument("--sizeskew", action="store_true", help="A-S by quote size: shrink the increasing side, grow the reducing side (AWS tape)")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]

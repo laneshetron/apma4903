@@ -519,6 +519,14 @@ func (e *Engine) onTick(ctx context.Context, now time.Time) {
 	if m == nil || l == nil {
 		return
 	}
+	if !now.Before(m.CloseAt) {
+		// the market has closed and the next one has not been adopted yet: silence is expected
+		e.mu.Lock()
+		e.paused = "between markets"
+		e.stats.Paused = e.paused
+		e.mu.Unlock()
+		return
+	}
 	// feeds that have not delivered anything yet are measured from startup, with a grace period to connect
 	const startupGrace = 20 * time.Second
 	bookAge := time.Duration(0)
