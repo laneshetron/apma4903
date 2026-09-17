@@ -73,6 +73,9 @@ class Params:
     stale_feed_ms: float | None = None       # pull quotes while the latest Coinbase message arrived this late (rx - exchange ts)
     stop_before_s: float = 120.0
     signal_move: float | None = None  # $ over 1s on the spot mid; None disables
+    signal_improve: bool = False      # on a spot move, post-only at the old ask on the side the move favours (first at the level it vacates)
+    signal_hold_ms: float = 2000.0    # how long a signal improve is exempt from the off-market cancel
+    signal_place_latency_ms: float | None = None  # spot tick seen -> our post-only live (tape time); default signal + (place - cancel)
     cooldown_ms: float = 1000.0
     queue: str = "prorata"          # prorata | pessimistic
     # adverse-selection filters
@@ -108,6 +111,7 @@ class Order:
     active_from: int   # rx_ns when the order is live
     cancel_at: int | None = None  # rx_ns when a cancel lands
     improved: bool = False        # placed one tick inside the touch
+    sig_until: int = 0            # signal improve: exempt from the off-market cancel until this rx_ns
     last_seen: int = 0            # rx_ns of the last probe update
     fair_at_place: float | None = None  # fair (cents) when placed, for delta-scaled repricing
     filled_any: bool = False
@@ -158,6 +162,11 @@ class Quoter:
         self.lat = int(((p.cancel_latency_ms if p.cancel_latency_ms is not None else p.latency_ms) + p.engine_lag_ms) * 1e6)
         self.lat_place = int(((p.place_latency_ms if p.place_latency_ms is not None else p.latency_ms) + p.engine_lag_ms) * 1e6)
         self.lat_signal = int((p.signal_latency_ms if p.signal_latency_ms is not None else p.latency_ms) * 1e6)
+        sig_place = p.signal_place_latency_ms
+        if sig_place is None:
+            sig_place = (p.signal_latency_ms if p.signal_latency_ms is not None else p.latency_ms) + \
+                        ((p.place_latency_ms or p.latency_ms) - (p.cancel_latency_ms or p.latency_ms))
+        self.lat_sig_place = int(sig_place * 1e6)
         self.orders: dict[str, dict[str, Order]] = defaultdict(dict)   # ticker -> side -> Order
         self.pnl: dict[str, MarketPnL] = {}
         self.blocked: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": 0, "no": 0})  # side -> rx_ns until which quoting is off
@@ -283,9 +292,14 @@ class Quoter:
                 o.unexplained.append((rx, ts_ms, before - after))
             elif o.ahead is None and after > before:
                 pass  # arrivals before activation are ahead of us anyway
-        for oo in self.orders[tk].values():
+        for oo in list(self.orders[tk].values()):
             prev_ahead = oo.ahead
             self._flush_unexplained(oo, rx, book)
+            if oo.ahead is None and rx >= oo.active_from and oo.sig_until and oo.price + book.best("no" if oo.side == "yes" else "yes") >= ONE:
+                # post-only at a price the other side still occupies: rejected by the exchange
+                del self.orders[tk][oo.side]
+                self.vetoes["post_only_cross"] += 1
+                continue
             if oo.ahead is None and rx >= oo.active_from:
                 oo.ahead = book.side(oo.side).get(oo.price, 0)
                 oo.last_seen = rx
@@ -335,7 +349,8 @@ class Quoter:
             o.ahead = 0
             self._fill(tk, o, spill, rx)
 
-    def on_tick(self, tk_list: list[str], rx: int, mid: float, mid_1s_ago: float | None, ctx: "Context | None" = None) -> None:
+    def on_tick(self, tk_list: list[str], rx: int, mid: float, mid_1s_ago: float | None, ctx: "Context | None" = None,
+                books: "dict[str, FastBook] | None" = None) -> None:
         if self.p.dfair_cancel_c is not None and ctx is not None:
             for tk in tk_list:
                 close_ns = ctx.closes.get(tk)
@@ -380,6 +395,49 @@ class Quoter:
             o = self.orders[tk].get(stale)
             if o is not None and o.cancel_at is None:
                 o.cancel_at = rx + self.lat_signal
+        if self.p.signal_improve and books is not None:
+            self._signal_improve(tk_list, rx, "yes" if d > 0 else "no", books)
+
+    def _signal_improve(self, tk_list: list[str], rx: int, fresh: str, books: "dict[str, FastBook]") -> None:
+        """Spot moved in favour of side `fresh`: the other side's touch is about to be pulled or taken.
+        Post-only at that price now; if the level is still occupied when we arrive the exchange
+        rejects it (post-only cross), otherwise we are the first bid at the vacated level."""
+        p = self.p
+        other = "no" if fresh == "yes" else "yes"
+        for tk in tk_list:
+            if tk in self.stopped:
+                continue
+            book = books[tk]
+            if book.best_yes < 0 or book.best_no < 0:
+                continue
+            spread = ONE - book.best_no - book.best_yes
+            tick = tick_at(book.best(fresh))
+            price = book.best(fresh) + tick if spread > tick else ONE - book.best(other)  # inside the spread, else the old ask
+            if price <= tick or price >= ONE - tick:
+                continue
+            r = self.m(tk)
+            lim = p.max_pos * QTY - p.size * QTY
+            if (fresh == "yes" and r.pos > lim) or (fresh == "no" and r.pos < -lim):
+                continue
+            if rx < self.blocked[tk][fresh]:
+                continue
+            cur = self.orders[tk].get(fresh)
+            if cur is not None and cur.cancel_at is None and cur.price >= price:
+                continue  # already there or better
+            size = p.size * QTY
+            if p.capital is not None:
+                reserved = sum(x.price / ONE * x.remaining / QTY for x in self.orders[tk].values() if x.cancel_at is None and x is not cur)
+                free = p.capital - r.locked() - reserved
+                afford = int(free / (price / ONE))
+                size = min(p.size, max(0, afford)) * QTY
+                if size < QTY:
+                    self.vetoes["capital"] += 1
+                    continue
+            # replace the resting join on this side (its fills during the cancel window are the benign direction; ignored)
+            o = Order(fresh, price, size, None, rx + self.lat_sig_place, improved=True)
+            o.sig_until = rx + int(p.signal_hold_ms * 1e6)
+            self.orders[tk][fresh] = o
+            self.vetoes["signal_improve"] += 1
 
     def _requote(self, tk: str, rx: int, book: FastBook, close_ns: int, ctx: "Context | None" = None) -> None:
         orders = self.orders[tk]
@@ -521,6 +579,9 @@ class Quoter:
                 self.vetoes["kept_front"] += 1
             if o is not None and o.cancel_at is None:
                 off = abs(o.price - want[s]) >= p.reprice_ticks * tick[s] if o.price != want[s] else False
+                if off and o.sig_until and rx < o.sig_until and o.price > want[s]:
+                    off = False   # a signal improve ahead of the touch is held for its window
+                    self.vetoes["sig_held"] += 1
                 young = p.min_rest_ms is not None and rx - o.active_from < p.min_rest_ms * 1e6
                 if not ok or (off and not young):
                     o.cancel_at = rx + self.lat
@@ -883,7 +944,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
             live = [tk for tk, b in books.items() if not b.stale]
             for q in quoters:
                 if rec.venue in q.p.signal_venues:
-                    q.on_tick(live, rx, mid, ago, ctx)
+                    q.on_tick(live, rx, mid, ago, ctx, books)
             continue
         raw = rec.raw
         if raw.get("type") == "cfbenchmarks_value" and raw["msg"].get("index_id") == "BRTI":
@@ -1160,6 +1221,33 @@ SIZES = [
     *[Params(f"depth 1000, size {n} / cap {2*n}, {q}, unlimited capital", **_D, size=n, max_pos=2*n, queue=q) for q in ("prorata", "pessimistic") for n in (50, 100)],
 ]
 
+# spot-triggered improve: post-only at the vacating touch on the spot trigger (first at the new level)
+_S = dict(stop_before_s=300, join_theta=0.0, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
+          place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, size=20, max_pos=20, capital=100, flatten_at_stop=True)
+SIGIMP = [
+    Params("baseline (signal cancel $2/1s)", **_S, signal_move=2.0),
+    Params("signal improve $2/1s, hold 2 s", **_S, signal_move=2.0, signal_improve=True),
+    Params("signal improve $2/1s, hold 0.5 s", **_S, signal_move=2.0, signal_improve=True, signal_hold_ms=500),
+    Params("signal improve $2/1s, hold 5 s", **_S, signal_move=2.0, signal_improve=True, signal_hold_ms=5000),
+    Params("signal improve $3/1s, hold 2 s", **_S, signal_move=3.0, signal_improve=True),
+    Params("signal improve $5/1s, hold 2 s", **_S, signal_move=5.0, signal_improve=True),
+    Params("signal improve $2/1s, hold 2 s, no join gate", **{**_S, "join_theta": None}, signal_move=2.0, signal_improve=True),
+    Params("signal improve $2/1s, hold 2 s, pessimistic queue", **_S, signal_move=2.0, signal_improve=True, queue="pessimistic"),
+    Params("signal improve $2/1s, hold 2 s, FIX-like 5/3/9", **{**_S, "place_latency_ms": 5, "cancel_latency_ms": 3, "signal_latency_ms": 9}, signal_move=2.0, signal_improve=True),
+    Params("signal improve $2/1s, hold 2 s, size 50", **{**_S, "size": 50, "max_pos": 50}, signal_move=2.0, signal_improve=True),
+]
+
+# what is latency worth under the corrected model? (engine lag 6 ms is physical; the 0 ms rows show the feed's share)
+_L = dict(signal_move=2.0, stop_before_s=300, join_theta=0.0, greeks_cap=0.05, price_priority=True, size=20, max_pos=20, capital=100, flatten_at_stop=True)
+LATENCY2 = [
+    *[Params(f"place {pl} / cancel {c} / signal {sg}, engine lag 6", **_L, engine_lag_ms=6.0, place_latency_ms=pl, cancel_latency_ms=c, signal_latency_ms=sg)
+      for pl, c, sg in ((9, 5, 11), (5, 3, 11), (3, 3, 11), (2, 2, 11), (2, 2, 2), (1, 1, 1))],
+    *[Params(f"place {pl} / cancel {c} / signal {sg}, engine lag 0 (hypothetical)", **_L, engine_lag_ms=0.0, place_latency_ms=pl, cancel_latency_ms=c, signal_latency_ms=sg)
+      for pl, c, sg in ((9, 5, 11), (2, 2, 2))],
+    *[Params(f"place {pl} / cancel {c} / signal {sg}, engine lag 6, pessimistic queue", **_L, engine_lag_ms=6.0, place_latency_ms=pl, cancel_latency_ms=c, signal_latency_ms=sg, queue="pessimistic")
+      for pl, c, sg in ((9, 5, 11), (2, 2, 11))],
+]
+
 # the depth gate joins behind 1000+ contracts: does its edge survive the queue model nobody has measured?
 EVAL4 = [
     Params("baseline, prorata queue", **_A3),
@@ -1316,10 +1404,12 @@ def main() -> None:
     ap.add_argument("--eval3", action="store_true", help="depth-gate threshold sweep")
     ap.add_argument("--eval4", action="store_true", help="depth gate under the pessimistic (no advancement) queue")
     ap.add_argument("--baseline", action="store_true", help="the live/paper configuration only (for paper_vs_sim)")
+    ap.add_argument("--sigimp", action="store_true", help="spot-triggered improve study")
+    ap.add_argument("--latency2", action="store_true", help="latency sweep under the corrected model")
     ap.add_argument("--sizes", action="store_true", help="depth 1000 size sweep under both queue models")
     ap.add_argument("--depth1000", action="store_true", help="the paper configuration from 2026-09-17 16:22 UTC: baseline + min depth 1000")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else SIGIMP if a.sigimp else LATENCY2 if a.latency2 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]

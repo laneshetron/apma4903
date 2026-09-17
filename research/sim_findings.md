@@ -505,3 +505,26 @@ What the run was for — the queue-advancement rate behind thick levels — is a
 - 161 of 162 fills were joins; 1 improve.
 
 Conclusion: at REST latency on KXBTC15M, a passive touch-joiner's fills are sweeps whatever the depth gate does; the queue in front of us does not turn over within an order's life. The pro-rata queue model — which every positive sim number depended on — is wrong for thick levels on this venue, and the honest sim estimate for the depth gate is the pessimistic one (≈ $0 to slightly negative). The remaining levers are front-of-queue placement (improves earned +1.81¢ live; the sim shows an edge only at ~2 ms placement, i.e. FIX/Premier) or a different contract/venue where the queue turns over.
+
+## 2026-09-17 — option 1 (latency): the gap by component, and whether anticipation can close it
+
+**Latency sweep under the corrected model** (`--latency2`, 95 markets, size 20 / cap 20, $/market, t):
+
+| event → our order in the engine | config | pooled | 09-16 / 09-17 |
+|---|---|---|---|
+| 15 ms | REST today 9/5, feed lag 6 | −2.06 (−4.5) | −0.42 / −2.65 |
+| 11 ms | FIX-like 5/3 | −1.76 (−3.4) | |
+| 9 ms | 3/3 | −1.29 (−2.9) | |
+| 8 ms | 2/2 | −1.23…−1.51 | +0.5 / −1.9 |
+| 7 ms | 1/1/1 | −0.78 (−1.6) | +0.59 / −1.27 |
+| 9 ms | REST 9/5 with feed lag 0 (hypothetical) | −0.66 (−1.5) | |
+| **2 ms** | **2/2 with feed lag 0 (hypothetical)** | **+2.93 (7.1), 80% win** | +4.03 / +2.54 |
+| 15 / 8 ms | pessimistic queue | −4.48 / −3.59 | |
+
+The "2 ms break-even" of the old frame was measured from the moment we *see* an event; with the physical 6 ms feed lag no order-entry latency makes the touch-joiner positive — the whole 15 → 7 ms range is worth ~$1.3/market and stays negative. The edge (+$3/market, t 7) exists only at ~2 ms *total*, i.e. if we could act before the WS delivers the event.
+
+Components of the 15 ms (measured): Kalshi engine → our WS receipt 6–7 ms (Kalshi-side; network 0.3); our decode/decision/Go scheduling ~1 (p99 7.5); RSA-PSS signing 1.7 ms on the c7g (inside the 9.0 ms probe number; removable — the signature covers `ts+method+path` only, so it can be pre-computed); JSON/HTTP/in-AZ network ~0.5; Kalshi REST gateway → shard engine ~7 (cancel is 5.2, so ~4 is order validation/collateral). We control ~3–4 ms; FIX would attack the ~7 ms gateway (unmeasurable without Premier). Neither reaches the regime that pays.
+
+**Anticipating instead of reading** (`level_lead.py`, 09-16, 8,044 Coinbase moves ≥ $2/1 s): only 51% of moves produce a new, better touch on the favoured side within 2 s; when one forms, 13% form within 16 ms of our spot receipt, p50 308 ms, p75 844 ms. So a bid sent on the spot trigger would be first at the vacated level in ~87% of formations — *if* it could rest there. It can't: the ask it needs to replace is still occupied when the order arrives. Sim (`--sigimp`, 09-16, post-only at the old ask on the trigger, replacing the resting join, 15 ms tape latency): **85% of the 9,150 signal orders are rejected post-only-cross**, the rest rest as lone improves; P&L −2.31/market vs −0.42 baseline at every hold (0.5/2/5 s), threshold ($2/3/5), with or without the join gate, at FIX-like latency (−2.01), and at size 50 (−4.36). The rule gives up queue position on the good side for a ticket that mostly bounces; re-firing until accepted converges on the existing improve-on-vacate rule with a few ms shaved, which the sweep values at ≈ $0.5/market.
+
+Conclusion: option 1 is closed on KXBTC15M. The binding constraint is the 6 ms feed lag, which no order-entry work or Coinbase-triggered anticipation gets around; the +$3/market front-of-queue regime needs a way to see or predict the engine's events ~4 ms sooner than the public WS, which we do not have.
