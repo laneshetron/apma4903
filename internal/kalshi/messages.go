@@ -15,6 +15,8 @@ const (
 	ChannelMarketLifecycle = "market_lifecycle_v2"
 	ChannelCFBenchmarks    = "cfbenchmarks_value"     // 1/s with 60s averages
 	ChannelCFBenchmarks5Hz = "cfbenchmarks_value_5hz" // raw ticks
+	ChannelUserOrders      = "user_orders"            // our order lifecycle (auth)
+	ChannelFill            = "fill"                   // our executions (auth)
 )
 
 // IndexChannels take index_ids instead of market_tickers.
@@ -32,6 +34,8 @@ const (
 	TypeTrade             = "trade"
 	TypeCFBenchmarksValue = "cfbenchmarks_value"
 	TypeCFBenchmarks5Hz   = "cfbenchmarks_value_5hz"
+	TypeUserOrder         = "user_order"
+	TypeFill              = "fill"
 )
 
 // Command is a client -> server command envelope.
@@ -180,4 +184,33 @@ type TickerMsg struct {
 // UnmarshalFrom decodes an envelope from raw bytes.
 func (e *Envelope) UnmarshalFrom(data []byte) error {
 	return json.Unmarshal(data, e)
+}
+
+// UserOrderMsg is a user_orders event (our own order lifecycle).
+type UserOrderMsg struct {
+	OrderID          string `json:"order_id"`
+	Ticker           string `json:"ticker"`
+	Status           string `json:"status"`
+	Side             string `json:"side"`
+	YesPriceDollars  string `json:"yes_price_dollars"`
+	FillCountFP      string `json:"fill_count_fp"`
+	RemainingCountFP string `json:"remaining_count_fp"`
+	InitialCountFP   string `json:"initial_count_fp"`
+	ClientOrderID    string `json:"client_order_id"`
+	CreatedTsMs      int64  `json:"created_ts_ms"`
+}
+
+// FillMsg is a fill event (one execution against our order).
+type FillMsg struct {
+	TradeID         string `json:"trade_id"`
+	OrderID         string `json:"order_id"`
+	MarketTicker    string `json:"market_ticker"`
+	IsTaker         bool   `json:"is_taker"`
+	Side            string `json:"side"`
+	YesPriceDollars string `json:"yes_price_dollars"`
+	NoPriceDollars  string `json:"no_price_dollars"`
+	CountFP         string `json:"count_fp"`
+	Action          string `json:"action"`
+	TsMs            int64  `json:"ts_ms"`
+	ClientOrderID   string `json:"client_order_id,omitempty"`
 }

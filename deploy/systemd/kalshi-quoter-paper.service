@@ -1,0 +1,18 @@
+[Unit]
+Description=Kalshi quoter (paper mode)
+After=network-online.target chronyd.service
+Wants=network-online.target
+
+[Service]
+User=kalshi
+WorkingDirectory=/opt/kalshi
+ExecStart=/opt/kalshi/bin/quoter -config /opt/kalshi/config.yaml -mode paper -tables /opt/kalshi/quoter_tables.json -status 127.0.0.1:8082
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+Nice=-5
+StandardOutput=append:/opt/kalshi/logs/quoter-paper.log
+StandardError=append:/opt/kalshi/logs/quoter-paper.log
+
+[Install]
+WantedBy=multi-user.target

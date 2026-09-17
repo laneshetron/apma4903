@@ -41,6 +41,27 @@ type Config struct {
 	MinBackoff, MaxBackoff time.Duration
 	// CommandTimeout bounds each subscribe/update round trip.
 	CommandTimeout time.Duration
+
+	// OnEvent, if set, is called (outside the feed lock, in message order)
+	// after each decoded data message has been applied.
+	OnEvent func(Event)
+}
+
+// Event is a decoded data message handed to Config.OnEvent.
+type Event struct {
+	Rx     time.Time
+	Type   string // kalshi.Type*
+	Ticker string // market ticker where applicable
+	Sid    int
+	Seq    uint64
+	Gap    bool // a sequence gap was detected on this message's sid
+	Delta  *kalshi.OrderbookDeltaMsg
+	Trade  *kalshi.TradeMsg
+	Index  *IndexValue // with IndexID in Ticker
+	Order  *kalshi.UserOrderMsg
+	Fill   *kalshi.FillMsg
+	Book   *book.Book // the market's book after applying this message (shared; read only, under no lock -- clone if retained)
+	Stale  bool
 }
 
 type marketState struct {
@@ -285,8 +306,17 @@ func (f *Feed) handle(ctx context.Context, conn *kalshi.Conn, m kalshi.RawMessag
 		return // subscribed/error responses without a sid; handled by Conn.Do
 	}
 
+	var ev *Event
+	if f.cfg.OnEvent != nil {
+		ev = &Event{Rx: m.Rx, Type: env.Type, Sid: env.Sid, Seq: env.Seq}
+	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	defer func() {
+		f.mu.Unlock()
+		if ev != nil && ev.Type != "" {
+			f.cfg.OnEvent(*ev)
+		}
+	}()
 	sub := f.subs[env.Sid]
 	if sub == nil {
 		// Data for a sid we haven't registered yet (subscribe response still
@@ -302,6 +332,9 @@ func (f *Feed) handle(ctx context.Context, conn *kalshi.Conn, m kalshi.RawMessag
 	if env.Seq != 0 {
 		if sub.hasSeq && env.Seq != sub.lastSeq+1 {
 			f.onGapLocked(ctx, conn, sub, env)
+			if ev != nil {
+				ev.Gap = true
+			}
 		}
 		sub.lastSeq, sub.hasSeq = env.Seq, true
 	}
@@ -319,6 +352,9 @@ func (f *Feed) handle(ctx context.Context, conn *kalshi.Conn, m kalshi.RawMessag
 			return
 		}
 		ms.stale, ms.lastRx, ms.sid = false, m.Rx, env.Sid
+		if ev != nil {
+			ev.Ticker, ev.Book, ev.Stale = s.MarketTicker, ms.book, false
+		}
 	case kalshi.TypeOrderbookDelta:
 		var d kalshi.OrderbookDeltaMsg
 		if err := env.Decode(&d); err != nil {
@@ -326,6 +362,9 @@ func (f *Feed) handle(ctx context.Context, conn *kalshi.Conn, m kalshi.RawMessag
 			return
 		}
 		ms := f.marketLocked(d.MarketTicker)
+		if ev != nil {
+			ev.Ticker, ev.Delta, ev.Book, ev.Stale = d.MarketTicker, &d, ms.book, ms.stale
+		}
 		if ms.stale {
 			return // waiting for a snapshot
 		}
@@ -355,6 +394,34 @@ func (f *Feed) handle(ctx context.Context, conn *kalshi.Conn, m kalshi.RawMessag
 			v.Avg60s = prev.Avg60s // keep the 1/s channel's average alongside 5hz ticks
 		}
 		f.indexes[iv.IndexID] = v
+		if ev != nil {
+			vv := v
+			ev.Ticker, ev.Index = iv.IndexID, &vv
+		}
+	case kalshi.TypeTrade:
+		if ev != nil {
+			var t kalshi.TradeMsg
+			if env.Decode(&t) == nil {
+				ev.Ticker, ev.Trade = t.MarketTicker, &t
+				if ms := f.markets[t.MarketTicker]; ms != nil {
+					ev.Book, ev.Stale = ms.book, ms.stale
+				}
+			}
+		}
+	case kalshi.TypeUserOrder:
+		if ev != nil {
+			var u kalshi.UserOrderMsg
+			if env.Decode(&u) == nil {
+				ev.Ticker, ev.Order = u.Ticker, &u
+			}
+		}
+	case kalshi.TypeFill:
+		if ev != nil {
+			var fl kalshi.FillMsg
+			if env.Decode(&fl) == nil {
+				ev.Ticker, ev.Fill = fl.MarketTicker, &fl
+			}
+		}
 	}
 }
 
