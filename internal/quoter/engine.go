@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,19 +60,21 @@ type Engine struct {
 	events chan feed.Event
 	quotes chan CoinbaseQuote
 
-	mu         sync.Mutex
-	market     *Market
-	ledger     *Ledger
-	inflight   map[book.Side]bool   // a place is being sent
-	wantCancel map[book.Side]string // cancel requested while the place was unacknowledged
-	lastBookRx time.Time
-	available  float64   // free collateral ($), -1 = unknown/unlimited
-	started    time.Time // engine start, or the last market roll
-	seqGap     bool
-	halted     string
-	paused     string
-	stats      Stats
-	vetoes     map[string]int // snapshot of the strategy's veto counters (the strategy is owned by the loop goroutine)
+	mu                sync.Mutex
+	market            *Market
+	ledger            *Ledger
+	inflight          map[book.Side]bool   // a place is being sent
+	wantCancel        map[book.Side]string // cancel requested while the place was unacknowledged
+	lastBookRx        time.Time
+	available         float64   // free collateral ($) as last polled (net of reservations at that time), -1 = unknown/unlimited
+	reservedAtPoll    float64   // our working orders' collateral when the balance was polled
+	fillCostSincePoll float64   // collateral turned into position cost since the poll
+	started           time.Time // engine start, or the last market roll
+	seqGap            bool
+	halted            string
+	paused            string
+	stats             Stats
+	vetoes            map[string]int // snapshot of the strategy's veto counters (the strategy is owned by the loop goroutine)
 }
 
 // Stats is the status-endpoint summary.
@@ -88,6 +91,7 @@ type Stats struct {
 	Placed     int            `json:"placed"`
 	Canceled   int            `json:"canceled"`
 	Errors     int            `json:"errors"`
+	Rejections int            `json:"rejections"`
 	Vetoes     map[string]int `json:"vetoes"`
 	SpotLagMs  float64        `json:"coinbase_lag_ms"`
 	BookAgeMs  float64        `json:"book_age_ms"`
@@ -208,8 +212,17 @@ func (e *Engine) refreshBalance(ctx context.Context) {
 		e.log.Warn("balance", "err", err)
 		return
 	}
+	reserved := 0.0
 	e.mu.Lock()
-	e.available = b
+	l := e.ledger
+	e.mu.Unlock()
+	if l != nil {
+		for _, o := range l.WorkingOrders() {
+			reserved += Collateral(o.Price, o.Qty-o.Filled)
+		}
+	}
+	e.mu.Lock()
+	e.available, e.reservedAtPoll, e.fillCostSincePoll = b, reserved, 0
 	e.stats.Available = b
 	e.mu.Unlock()
 }
@@ -218,7 +231,7 @@ func (e *Engine) refreshBalance(ctx context.Context) {
 // and in paper mode the fixed budget less all reservations and the position's cost.
 func (e *Engine) freeCollateral(l *Ledger) float64 {
 	e.mu.Lock()
-	avail := e.available
+	avail, atPoll, fillCost := e.available, e.reservedAtPoll, e.fillCostSincePoll
 	e.mu.Unlock()
 	if avail < 0 {
 		return -1
@@ -228,10 +241,10 @@ func (e *Engine) freeCollateral(l *Ledger) float64 {
 		reserved += Collateral(o.Price, o.Qty-o.Filled)
 	}
 	if e.cfg.Balance == nil {
-		_, cash := l.Position()
-		avail += cash // paper: cash spent on the position is no longer free
+		return avail - l.CollateralUsed() - reserved // paper: fixed budget less position collateral and reservations
 	}
-	return avail - reserved
+	// live: the polled balance is already net of what was reserved then; adjust for changes since
+	return avail - (reserved - atPoll) - fillCost
 }
 
 func (e *Engine) shutdown() {
@@ -373,15 +386,20 @@ func (e *Engine) applyLiveFill(l *Ledger, ev feed.Event) {
 	if err != nil {
 		return
 	}
-	var price book.Price
-	if o.Side == book.Yes {
-		price, _ = book.ParsePrice(f.YesPriceDollars)
-	} else {
-		price, _ = book.ParsePrice(f.NoPriceDollars)
+	// fills always carry the YES price; a NO bid at p is a YES sale at 1-p
+	yes, err := book.ParsePrice(f.YesPriceDollars)
+	if err != nil {
+		e.log.Warn("fill without yes price", "order", f.OrderID)
+		return
+	}
+	price := yes
+	if o.Side == book.No {
+		price = book.OneDollar - yes
 	}
 	l.OnFill(f.TradeID, Fill{Rx: ev.Rx, Ticker: f.MarketTicker, OrderID: f.OrderID, Side: o.Side, Price: price, Qty: qty, Taker: f.IsTaker})
 	e.mu.Lock()
 	e.stats.Fills++
+	e.fillCostSincePoll += Collateral(price, qty) // a fill turns reserved collateral into position cost
 	e.mu.Unlock()
 }
 
@@ -517,11 +535,28 @@ func (e *Engine) execute(ctx context.Context, l *Ledger, a Action, now time.Time
 			delete(e.inflight, a.Side)
 			e.mu.Unlock()
 			if err != nil {
-				e.risk.RecordError()
-				e.mu.Lock()
-				e.stats.Errors++
-				e.mu.Unlock()
-				e.log.Warn("place failed", "side", a.Side, "err", err)
+				switch {
+				case strings.Contains(err.Error(), "insufficient_balance"):
+					// our collateral estimate ran ahead of the exchange: stop sizing until the next poll
+					e.mu.Lock()
+					if e.available > 0 {
+						e.available = 0
+					}
+					e.stats.Rejections++
+					e.mu.Unlock()
+					e.log.Warn("place rejected: insufficient balance", "side", a.Side)
+				case strings.Contains(err.Error(), "invalid_order"):
+					// post-only would have crossed: the book moved under the quote; the next book event re-decides
+					e.mu.Lock()
+					e.stats.Rejections++
+					e.mu.Unlock()
+				default:
+					e.risk.RecordError()
+					e.mu.Lock()
+					e.stats.Errors++
+					e.mu.Unlock()
+					e.log.Warn("place failed", "side", a.Side, "err", err)
+				}
 				return
 			}
 			e.risk.RecordOK()

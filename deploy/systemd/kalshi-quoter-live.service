@@ -1,0 +1,18 @@
+[Unit]
+Description=Kalshi quoter (LIVE, small size)
+After=network-online.target chronyd.service
+Wants=network-online.target
+
+[Service]
+User=kalshi
+WorkingDirectory=/opt/kalshi
+ExecStart=/opt/kalshi/bin/quoter -config /opt/kalshi/config.yaml -mode live -shard 2 -size 5 -max-pos 10 -max-loss 4 -tables /opt/kalshi/quoter_tables.json -status 127.0.0.1:8083
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+Nice=-5
+StandardOutput=append:/opt/kalshi/logs/quoter-live.log
+StandardError=append:/opt/kalshi/logs/quoter-live.log
+
+[Install]
+WantedBy=multi-user.target

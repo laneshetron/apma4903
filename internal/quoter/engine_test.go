@@ -2,6 +2,7 @@ package quoter
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -269,4 +270,70 @@ func TestEngineSizesToPaperCapital(t *testing.T) {
 		w := eng.Stats().Working
 		return len(w) == 2 && w["yes"].(map[string]any)["qty"] == "5.00" && w["no"].(map[string]any)["qty"] == "5.00"
 	})
+}
+
+func TestEngineLiveFillUsesYesPriceForNoOrders(t *testing.T) {
+	tk := "KXBTC15M-TEST"
+	src := &fakeSource{books: map[string]*book.Book{tk: mkBook(5000, 300*100, 2700, 300*100)}}
+	ex := &fakeExec{}
+	var eng *Engine
+	eng = NewEngine(EngineConfig{
+		Params: Params{Size: 5 * 100, MaxPos: 10 * 100, StopBefore: 5 * time.Minute}, Limits: testLimits(), Mode: "live", Exec: ex, Feed: src, Capital: -1,
+		PickMarket: func(context.Context) (*Market, error) {
+			return &Market{Ticker: tk, Strike: 76000, CloseAt: time.Now().Add(10 * time.Minute)}, nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = eng.Run(ctx) }()
+	eng.OnFeedEvent(delta(tk, book.Yes, 5000, 100, 1))
+	waitFor(t, "quotes", func() bool { return len(eng.Stats().Working) == 2 })
+	no := eng.ledger.Working(book.No)
+	// a taker buys YES at 0.73: our NO bid at 0.27 is filled; the fill message carries the YES price only
+	eng.OnFeedEvent(feed.Event{Rx: time.Now(), Type: kalshi.TypeFill, Ticker: tk,
+		Fill: &kalshi.FillMsg{TradeID: "t1", OrderID: no.ID, MarketTicker: tk, Side: "yes", YesPriceDollars: "0.7300", CountFP: "5.00", Action: "sell"}})
+	waitFor(t, "fill applied", func() bool { return eng.Stats().Fills == 1 })
+	s := eng.Stats()
+	if s.Pos != "-5.00" || s.Cash < 3.64 || s.Cash > 3.66 {
+		t.Fatalf("selling 5 YES at 0.73 should give pos -5 and cash +3.65, got pos %s cash %v", s.Pos, s.Cash)
+	}
+}
+
+type rejectingExec struct {
+	fakeExec
+	msg string
+}
+
+func (r *rejectingExec) Place(context.Context, string, book.Side, book.Price, book.Qty, string) (string, time.Time, error) {
+	return "", time.Time{}, fmt.Errorf("create order: HTTP 400 {\"error\":{\"code\":\"%s\"}}", r.msg)
+}
+
+func TestEngineBalanceRejectionDoesNotHalt(t *testing.T) {
+	tk := "KXBTC15M-TEST"
+	src := &fakeSource{books: map[string]*book.Book{tk: mkBook(5000, 300*100, 4900, 300*100)}}
+	ex := &rejectingExec{msg: "insufficient_balance"}
+	eng := NewEngine(EngineConfig{
+		Params: Params{Size: 5 * 100, MaxPos: 10 * 100, StopBefore: 5 * time.Minute}, Limits: testLimits(), Mode: "live", Exec: ex, Feed: src,
+		Balance: func(context.Context) (float64, error) { return 5, nil },
+		PickMarket: func(context.Context) (*Market, error) {
+			return &Market{Ticker: tk, Strike: 76000, CloseAt: time.Now().Add(10 * time.Minute)}, nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = eng.Run(ctx) }()
+	for i := 0; i < 12; i++ {
+		eng.OnFeedEvent(delta(tk, book.Yes, 5000, 100, int64(i)))
+		time.Sleep(20 * time.Millisecond)
+	}
+	s := eng.Stats()
+	if s.Halted != "" {
+		t.Fatalf("insufficient balance must not halt, got %q", s.Halted)
+	}
+	if s.Rejections == 0 || s.Errors != 0 {
+		t.Fatalf("rejections %d errors %d", s.Rejections, s.Errors)
+	}
+	if s.Available != 5 {
+		t.Fatalf("polled balance should be reported, got %v", s.Available)
+	}
 }

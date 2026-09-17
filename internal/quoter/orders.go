@@ -55,7 +55,8 @@ type Ledger struct {
 	byID    map[string]*Order
 	working map[book.Side]*Order
 	pos     book.Qty
-	cash    float64 // dollars, signed
+	cash    float64 // dollars, signed (YES-sale convention: a NO fill at p credits 1-p)
+	paid    float64 // collateral actually paid for fills: YES fills at the YES price, NO fills at the NO price
 	fills   []Fill
 	seen    map[string]bool // fill ids applied
 	onEvent func(kind string, fields map[string]any)
@@ -257,6 +258,7 @@ func (l *Ledger) OnFill(fillID string, f Fill) {
 	}
 	// a YES bid fill is +qty YES at price; a NO bid fill is -qty YES at (1 - price)
 	contracts := float64(f.Qty) / 100
+	l.paid += Collateral(f.Price, f.Qty)
 	if f.Side == book.Yes {
 		l.pos += f.Qty
 		l.cash -= contracts * float64(f.Price) / 10000
@@ -266,6 +268,13 @@ func (l *Ledger) OnFill(fillID string, f Fill) {
 	}
 	l.fills = append(l.fills, f)
 	l.onEvent("fill", map[string]any{"order_id": f.OrderID, "side": f.Side.String(), "price": f.Price.String(), "qty": f.Qty.String(), "pos": l.pos.String()})
+}
+
+// CollateralUsed is the dollars paid for the position so far (what Kalshi holds against it).
+func (l *Ledger) CollateralUsed() float64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.paid
 }
 
 // MarkPnL is cash plus the position marked at mid ($).
