@@ -406,3 +406,58 @@ func TestEngineNeverOverSizesWhenEstimateGoesNegative(t *testing.T) {
 		t.Fatalf("errors %d halted %q", s.Errors, s.Halted)
 	}
 }
+
+func TestEngineLossLimitIsCumulativeAcrossMarkets(t *testing.T) {
+	a, b := "KXBTC15M-A", "KXBTC15M-B"
+	src := &fakeSource{books: map[string]*book.Book{a: mkBook(5000, 100, 4900, 100), b: mkBook(5000, 100, 4900, 100)}}
+	var mu sync.Mutex
+	cur := &Market{Ticker: a, Strike: 76000, CloseAt: time.Now().Add(10 * time.Minute)}
+	ex := &fakeExec{}
+	lim := testLimits()
+	lim.MaxLoss = 15
+	eng := NewEngine(EngineConfig{
+		Params: Params{Size: 100 * 100, MaxPos: 200 * 100, StopBefore: 5 * time.Minute}, Limits: lim, Mode: "live", Exec: ex, Feed: src, Capital: -1,
+		PickMarket: func(context.Context) (*Market, error) { mu.Lock(); defer mu.Unlock(); return cur, nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = eng.Run(ctx) }()
+	eng.OnFeedEvent(delta(a, book.Yes, 5000, 100, 1))
+	resting := func() bool {
+		w := eng.Stats().Working
+		return len(w) == 2 && w["yes"].(map[string]any)["state"] == "resting" && w["no"].(map[string]any)["state"] == "resting"
+	}
+	waitFor(t, "quotes on A", resting)
+	// market A: buy 100 YES at 50c, then the mid drops to 40c: -$10, under the $15 limit on its own
+	y := eng.ledger.Working(book.Yes)
+	eng.OnFeedEvent(feed.Event{Rx: time.Now(), Type: kalshi.TypeFill, Ticker: a,
+		Fill: &kalshi.FillMsg{TradeID: "t1", OrderID: y.ID, MarketTicker: a, YesPriceDollars: "0.5000", CountFP: "100.00"}})
+	waitFor(t, "fill A", func() bool { return eng.Stats().Fills == 1 })
+	src.set(a, mkBook(4000, 100, 6100, 100))
+	eng.OnFeedEvent(delta(a, book.Yes, 5000, -100, 2))
+	waitFor(t, "A marked -10", func() bool { s := eng.Stats(); return s.MarkPnL < -9.9 && s.Halted == "" })
+	// roll to B carrying the -$10; another -$10 on B must trip the session limit
+	mu.Lock()
+	cur = &Market{Ticker: b, Strike: 76000, CloseAt: time.Now().Add(20 * time.Minute)}
+	mu.Unlock()
+	// the engine polls PickMarket every 5s; let it roll on its own to avoid racing the loop
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if s := eng.Stats(); s.Market == b && s.SessionPnL < -9.9 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if s := eng.Stats(); s.Market != b || s.SessionPnL > -9.9 {
+		t.Fatalf("expected roll to B carrying the loss, got %+v", s)
+	}
+	eng.OnFeedEvent(delta(b, book.Yes, 5000, 100, 3))
+	waitFor(t, "quotes on B", resting)
+	y = eng.ledger.Working(book.Yes)
+	eng.OnFeedEvent(feed.Event{Rx: time.Now(), Type: kalshi.TypeFill, Ticker: b,
+		Fill: &kalshi.FillMsg{TradeID: "t2", OrderID: y.ID, MarketTicker: b, YesPriceDollars: "0.5000", CountFP: "100.00"}})
+	waitFor(t, "fill B", func() bool { return eng.Stats().Pos == "100.00" }) // Stats.Fills is per market
+	src.set(b, mkBook(4000, 100, 6100, 100))
+	eng.OnFeedEvent(delta(b, book.Yes, 5000, -100, 4))
+	waitFor(t, "session halt", func() bool { return eng.Stats().Halted != "" })
+}

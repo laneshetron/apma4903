@@ -73,6 +73,7 @@ type Engine struct {
 	reservedAtPoll    float64   // our working orders' collateral when the balance was polled
 	fillCostSincePoll float64   // collateral turned into position cost since the poll
 	started           time.Time // engine start, or the last market roll
+	closedPnL         float64   // mark P&L of finished markets this session (positions marked at the last mid)
 	seqGap            bool
 	halted            string
 	paused            string
@@ -89,6 +90,7 @@ type Stats struct {
 	Pos        string         `json:"pos"`
 	Cash       float64        `json:"cash_$"`
 	MarkPnL    float64        `json:"mark_pnl_$"`
+	SessionPnL float64        `json:"session_pnl_$"` // finished markets + current mark
 	Fills      int            `json:"fills"`
 	Available  float64        `json:"available_$"`
 	Placed     int            `json:"placed"`
@@ -330,8 +332,19 @@ func (e *Engine) shutdownMarket(m *Market) {
 		_ = l.Cancel(ctx, e.cfg.Exec, side, "roll")
 	}
 	pos, cash := l.Position()
-	e.tape("market_done", map[string]any{"ticker": m.Ticker, "pos": pos.String(), "cash": cash, "fills": len(l.Fills())})
-	e.log.Info("market done", "ticker", m.Ticker, "pos", pos, "cash", fmt.Sprintf("%.2f", cash), "fills", len(l.Fills()))
+	mid := book.Price(5000)
+	if bv, ok := e.cfg.Feed.Book(m.Ticker); ok {
+		if mm, ok := bv.Book.Top().Mid(); ok {
+			mid = mm
+		}
+	}
+	pnl := l.MarkPnL(mid)
+	e.mu.Lock()
+	e.closedPnL += pnl
+	e.stats.SessionPnL = e.closedPnL
+	e.mu.Unlock()
+	e.tape("market_done", map[string]any{"ticker": m.Ticker, "pos": pos.String(), "cash": cash, "fills": len(l.Fills()), "mark_pnl": pnl, "session_pnl": e.closedPnL})
+	e.log.Info("market done", "ticker", m.Ticker, "pos", pos, "cash", fmt.Sprintf("%.2f", cash), "fills", len(l.Fills()), "mark_pnl", fmt.Sprintf("%.2f", pnl), "session", fmt.Sprintf("%.2f", e.closedPnL))
 }
 
 func (e *Engine) onFeed(ctx context.Context, ev feed.Event) {
@@ -476,7 +489,10 @@ func (e *Engine) onTick(ctx context.Context, now time.Time) {
 		}
 	}
 	pos, _ := l.Position()
-	h, p := e.risk.Check(now, pos, l.MarkPnL(mid), bookAge, spotAge, gap)
+	e.mu.Lock()
+	closed := e.closedPnL
+	e.mu.Unlock()
+	h, p := e.risk.Check(now, pos, closed+l.MarkPnL(mid), bookAge, spotAge, gap)
 	if h != "" && e.halted == "" {
 		e.halted = h
 		e.log.Error("HALT", "reason", h)
@@ -658,6 +674,7 @@ func (e *Engine) Stats() Stats {
 			}
 		}
 		s.MarkPnL = e.ledger.MarkPnL(mid)
+		s.SessionPnL = e.closedPnL + s.MarkPnL
 		s.Fills = len(e.ledger.Fills())
 		views, _ := e.ledger.Views()
 		for side, v := range views {
