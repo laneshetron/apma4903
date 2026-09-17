@@ -352,3 +352,12 @@ Sim now reserves price x qty for resting bids and holds collateral against the N
 - Position cap sweep (size 20, $100, flatten): cap 100 $7.5/6.1 per mkt SD 23/18; cap 40 $2.9/4.7 SD 10/7.8; **cap 20 $3.2/2.6 SD 3.6/4.5 (t 4.5/2.2)**. Per-contract edge unchanged (0.10-0.15c): inventory adds variance, no return.
 - A-S by SIZE (increasing side size*(1-|q|/cap), reducing side size*(1+|q|/cap)): cap 40 + skew $5.1/4.5 per mkt, SD 7.7/7.1, t 3.3/2.5, avg max pos ~30; at the standing size $24.6/21.2 (from 22.7/17.3) with lower SD. Best mean per unit variance among the tested configs; cap 20 remains the lowest-variance.
 - Live config as of 2026-09-17 04:15 UTC: size 20 / max 20 / flatten at stop / $20 session stop. Candidate upgrade after a baseline: size 20 / max 40 + size skew.
+
+## Why live loses where paper wins (2026-09-17 04:13-04:45 UTC, cap-20 config, same markets, `fill_markouts.py`)
+
+| | fills | contracts | half-spread at fill | mo 1s | mo 10s | mo 30s | P&L@30s |
+|---|---|---|---|---|---|---|---|
+| live | 567 | 8,491 | +0.23c | -0.08 | -0.15 | **-0.18c** | -$15.5 |
+| paper | 776 | 8,912 | +0.21c | +0.03 | +0.06 | **+0.03c** | +$2.8 |
+
+Spread capture is identical; adverse selection is 2x worse live (-0.41c vs -0.18c per contract). Split by whether our level was emptied within 300 ms of the fill: live fills are 36% full-sweep (mo30 -0.97c) vs paper 25% (-0.62c); partial-sweep fills earn +0.27c in both. Live gets more of the toxic full-sweep fills and they are more toxic: the paper queue model (pro-rata cancels ahead of us) advances our order too fast, so paper fills on partial sweeps that never reach us in reality. Fix the model to FIFO with cancels from behind (`queue="pessimistic"`) and re-base every P&L estimate on it before trading again.
