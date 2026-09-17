@@ -337,3 +337,26 @@ func TestEngineBalanceRejectionDoesNotHalt(t *testing.T) {
 		t.Fatalf("polled balance should be reported, got %v", s.Available)
 	}
 }
+
+func TestEngineRecoversPositionOnStart(t *testing.T) {
+	tk := "KXBTC15M-TEST"
+	src := &fakeSource{books: map[string]*book.Book{tk: mkBook(5000, 300*100, 4900, 300*100)}}
+	ex := &fakeExec{}
+	eng := NewEngine(EngineConfig{
+		Params: Params{Size: 5 * 100, MaxPos: 10 * 100, StopBefore: 5 * time.Minute}, Limits: testLimits(), Mode: "live", Exec: ex, Feed: src, Capital: -1,
+		PickMarket: func(context.Context) (*Market, error) {
+			return &Market{Ticker: tk, Strike: 76000, CloseAt: time.Now().Add(10 * time.Minute)}, nil
+		},
+		Recover: func(context.Context, string) (book.Qty, error) { return 7 * 100, nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = eng.Run(ctx) }()
+	waitFor(t, "recovered", func() bool { return eng.Stats().Pos == "7.00" })
+	if pnl := eng.Stats().MarkPnL; pnl < -0.01 || pnl > 0.01 {
+		t.Fatalf("recovered position should start at zero P&L, got %v", pnl)
+	}
+	// with 7 long and max pos 10 / size 5, only the NO side can be quoted
+	eng.OnFeedEvent(delta(tk, book.Yes, 5000, 100, 1))
+	waitFor(t, "one-sided quotes", func() bool { w := eng.Stats().Working; return len(w) == 1 && w["no"] != nil })
+}

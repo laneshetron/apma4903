@@ -47,6 +47,9 @@ type EngineConfig struct {
 	Balance func(ctx context.Context) (float64, error)
 	// Capital, when Balance is nil, is a fixed budget (paper mode); <0 = unlimited.
 	Capital float64
+	// Recover, if set (live), is called when a market is adopted: it should cancel any resting
+	// orders left on that market by a previous process and return the current position.
+	Recover func(ctx context.Context, ticker string) (pos book.Qty, err error)
 }
 
 // Engine runs the strategy on one market at a time.
@@ -243,8 +246,10 @@ func (e *Engine) freeCollateral(l *Ledger) float64 {
 	if e.cfg.Balance == nil {
 		return avail - l.CollateralUsed() - reserved // paper: fixed budget less position collateral and reservations
 	}
-	// live: the polled balance is already net of what was reserved then; adjust for changes since
-	return avail - (reserved - atPoll) - fillCost
+	// live: Kalshi's balance is gross cash (resting reservations are not deducted); fills since the
+	// poll have spent cash the poll did not see
+	_ = atPoll
+	return avail - reserved - fillCost
 }
 
 func (e *Engine) shutdown() {
@@ -284,6 +289,24 @@ func (e *Engine) rollMarket(ctx context.Context) {
 		fields["ticker"] = m.Ticker
 		e.tape(kind, fields)
 	})
+	if e.cfg.Recover != nil {
+		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		pos, err := e.cfg.Recover(rctx, m.Ticker)
+		cancel()
+		if err != nil {
+			e.log.Error("recover position", "ticker", m.Ticker, "err", err)
+		} else if pos != 0 {
+			mid := book.Price(5000)
+			if bv, ok := e.cfg.Feed.Book(m.Ticker); ok {
+				if mm, ok := bv.Book.Top().Mid(); ok {
+					mid = mm
+				}
+			}
+			ledger.Seed(pos, mid)
+			e.log.Warn("recovered position from a previous process", "ticker", m.Ticker, "pos", pos)
+			e.tape("recovered", map[string]any{"ticker": m.Ticker, "pos": pos.String()})
+		}
+	}
 	e.mu.Lock()
 	e.market, e.ledger = m, ledger
 	e.inflight, e.wantCancel = map[book.Side]bool{}, map[book.Side]string{}

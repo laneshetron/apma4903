@@ -71,6 +71,20 @@ func NewLedger(ticker string, onEvent func(kind string, fields map[string]any)) 
 	return &Ledger{ticker: ticker, orders: map[string]*Order{}, byID: map[string]*Order{}, working: map[book.Side]*Order{}, seen: map[string]bool{}, onEvent: onEvent}
 }
 
+// Seed sets a position inherited from a previous process, marked at mid so
+// the session P&L starts at zero.
+func (l *Ledger) Seed(pos book.Qty, mid book.Price) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pos = pos
+	l.cash = -float64(pos) / 100 * float64(mid) / float64(book.OneDollar)
+	if pos > 0 {
+		l.paid = Collateral(mid, pos)
+	} else {
+		l.paid = Collateral(book.OneDollar-mid, -pos)
+	}
+}
+
 // Views returns the strategy's view of working orders and the position.
 func (l *Ledger) Views() (map[book.Side]*OrderView, book.Qty) {
 	l.mu.Lock()

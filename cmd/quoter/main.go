@@ -154,7 +154,9 @@ func run() error {
 	}
 
 	var balance func(context.Context) (float64, error)
+	var recover func(context.Context, string) (book.Qty, error)
 	if *mode == "live" {
+		recover = exec.(*quoter.LiveExecutor).Recover
 		balance = func(ctx context.Context) (float64, error) {
 			ex := gen.ExchangeIndex(*shard)
 			resp, err := rest.Raw().GetBalanceWithResponse(ctx, &gen.GetBalanceParams{ExchangeIndex: &ex})
@@ -171,7 +173,7 @@ func run() error {
 	}
 	eng = quoter.NewEngine(quoter.EngineConfig{
 		Params: params, Limits: limits, Series: *series, Mode: *mode, Exec: exec, Paper: paper, Feed: fd,
-		Recorder: rec, Edge: edge, Logger: log, PickMarket: pick, Balance: balance, Capital: *paperCapital,
+		Recorder: rec, Edge: edge, Logger: log, PickMarket: pick, Balance: balance, Capital: *paperCapital, Recover: recover,
 	})
 
 	go func() {

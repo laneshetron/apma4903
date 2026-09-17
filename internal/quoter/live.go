@@ -73,9 +73,45 @@ func (e *LiveExecutor) Cancel(ctx context.Context, _ string, orderID string) (ti
 		return time.Time{}, err
 	}
 	if resp.JSON200 == nil {
+		if resp.StatusCode() == http.StatusNotFound {
+			return time.Time{}, ErrOrderDone // already filled or cancelled
+		}
 		return time.Time{}, fmt.Errorf("cancel order: HTTP %d %s", resp.StatusCode(), truncate(resp.Body, 200))
 	}
 	return time.UnixMilli(resp.JSON200.TsMs), nil
+}
+
+// Recover cancels any resting orders on ticker left by a previous process and
+// returns the current signed YES position.
+func (e *LiveExecutor) Recover(ctx context.Context, ticker string) (book.Qty, error) {
+	status := "resting"
+	ex := gen.ExchangeIndexFilterQuery(e.shard)
+	orders, err := e.cl.GetOrdersWithResponse(ctx, &gen.GetOrdersParams{Ticker: ticker, Status: &status, ExchangeIndex: &ex})
+	if err != nil {
+		return 0, err
+	}
+	if orders.JSON200 == nil {
+		return 0, fmt.Errorf("list orders: HTTP %d", orders.StatusCode())
+	}
+	for _, o := range orders.JSON200.Orders {
+		if _, err := e.Cancel(ctx, ticker, o.OrderId); err != nil && err != ErrOrderDone {
+			return 0, fmt.Errorf("cancel stray order %s: %w", o.OrderId, err)
+		}
+	}
+	pex := gen.ExchangeIndexFilterQuery(e.shard)
+	pos, err := e.cl.GetPositionsWithResponse(ctx, &gen.GetPositionsParams{Ticker: ticker, ExchangeIndex: &pex})
+	if err != nil {
+		return 0, err
+	}
+	if pos.JSON200 == nil {
+		return 0, fmt.Errorf("positions: HTTP %d", pos.StatusCode())
+	}
+	for _, p := range pos.JSON200.MarketPositions {
+		if p.Ticker == ticker {
+			return book.ParseQty(p.PositionFp)
+		}
+	}
+	return 0, nil
 }
 
 func truncate(b []byte, n int) string {
