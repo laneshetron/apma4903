@@ -61,9 +61,10 @@ type Engine struct {
 	inflight   map[book.Side]bool   // a place is being sent
 	wantCancel map[book.Side]string // cancel requested while the place was unacknowledged
 	lastBookRx time.Time
-	started    time.Time
+	started    time.Time // engine start, or the last market roll
 	seqGap     bool
 	halted     string
+	paused     string
 	stats      Stats
 }
 
@@ -72,6 +73,7 @@ type Stats struct {
 	Mode       string         `json:"mode"`
 	Market     string         `json:"market"`
 	Halted     string         `json:"halted,omitempty"`
+	Paused     string         `json:"paused,omitempty"`
 	Pos        string         `json:"pos"`
 	Cash       float64        `json:"cash_$"`
 	MarkPnL    float64        `json:"mark_pnl_$"`
@@ -219,7 +221,8 @@ func (e *Engine) rollMarket(ctx context.Context) {
 	e.mu.Lock()
 	e.market, e.ledger = m, ledger
 	e.inflight, e.wantCancel = map[book.Side]bool{}, map[book.Side]string{}
-	e.strat = NewStrategy(e.cfg.Params) // fresh cooldowns
+	e.strat = NewStrategy(e.cfg.Params)               // fresh cooldowns
+	e.lastBookRx, e.started = time.Time{}, time.Now() // the new market's book needs a moment to arrive
 	e.mu.Unlock()
 	if err := e.cfg.Feed.SetMarkets(ctx, []string{m.Ticker}); err != nil {
 		e.log.Error("subscribe market", "ticker", m.Ticker, "err", err)
@@ -379,7 +382,8 @@ func (e *Engine) onTick(ctx context.Context, now time.Time) {
 		}
 	}
 	pos, _ := l.Position()
-	if h := e.risk.Check(now, pos, l.MarkPnL(mid), bookAge, spotAge, gap); h != "" && e.halted == "" {
+	h, p := e.risk.Check(now, pos, l.MarkPnL(mid), bookAge, spotAge, gap)
+	if h != "" && e.halted == "" {
 		e.halted = h
 		e.log.Error("HALT", "reason", h)
 		e.tape("halt", map[string]any{"reason": h})
@@ -387,16 +391,29 @@ func (e *Engine) onTick(ctx context.Context, now time.Time) {
 			e.execute(ctx, l, Action{Kind: Cancel, Side: side, Reason: "halt"}, now)
 		}
 	}
-	// a seq gap only halts the current market's quoting; the feed resnapshots by itself
+	e.mu.Lock()
+	wasPaused := e.paused
+	e.paused = p
+	e.mu.Unlock()
+	if p != "" && wasPaused == "" {
+		e.log.Warn("PAUSE", "reason", p)
+		e.tape("pause", map[string]any{"reason": p})
+		for _, side := range []book.Side{book.Yes, book.No} {
+			e.execute(ctx, l, Action{Kind: Cancel, Side: side, Reason: "pause"}, now)
+		}
+	} else if p == "" && wasPaused != "" {
+		e.log.Info("RESUME")
+		e.tape("resume", nil)
+	}
 	e.decide(ctx, now)
 }
 
 // decide runs the strategy against the current book and executes the actions.
 func (e *Engine) decide(ctx context.Context, now time.Time) {
 	e.mu.Lock()
-	m, l := e.market, e.ledger
+	m, l, paused := e.market, e.ledger, e.paused
 	e.mu.Unlock()
-	if m == nil || l == nil || e.risk.Halted() != "" {
+	if m == nil || l == nil || e.risk.Halted() != "" || paused != "" {
 		return
 	}
 	bv, ok := e.cfg.Feed.Book(m.Ticker)
@@ -499,6 +516,7 @@ func (e *Engine) Stats() Stats {
 	s := e.stats
 	s.Mode = e.cfg.Mode
 	s.Halted = e.risk.Halted()
+	s.Paused = e.paused
 	s.Vetoes = map[string]int{}
 	for k, v := range e.strat.Vetoes {
 		s.Vetoes[k] = v

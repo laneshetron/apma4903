@@ -168,7 +168,7 @@ func TestEngineHaltsOnLimitAndCancelsEverything(t *testing.T) {
 	}
 }
 
-func TestEngineHaltsWhenBookGoesSilent(t *testing.T) {
+func TestEnginePausesWhenBookGoesSilentAndResumes(t *testing.T) {
 	tk := "KXBTC15M-TEST"
 	src := &fakeSource{books: map[string]*book.Book{tk: mkBook(5000, 100, 4900, 100)}}
 	mkt := &Market{Ticker: tk, Strike: 76000, CloseAt: time.Now().Add(10 * time.Minute)}
@@ -178,8 +178,14 @@ func TestEngineHaltsWhenBookGoesSilent(t *testing.T) {
 	defer cancel()
 	eng.OnFeedEvent(delta(tk, book.Yes, 5000, 100, 1))
 	waitFor(t, "quotes", func() bool { return len(eng.Stats().Working) == 2 })
-	waitFor(t, "silence halt", func() bool { return eng.Stats().Halted != "" })
+	waitFor(t, "silence pause", func() bool { return eng.Stats().Paused != "" })
 	waitFor(t, "orders cancelled", func() bool { return len(eng.Stats().Working) == 0 })
+	if eng.Stats().Halted != "" {
+		t.Fatal("silence must pause, not halt")
+	}
+	// the book comes back: quoting resumes on its own
+	eng.OnFeedEvent(delta(tk, book.Yes, 5000, 100, 2))
+	waitFor(t, "resume", func() bool { s := eng.Stats(); return s.Paused == "" && len(s.Working) == 2 })
 }
 
 func TestEngineRollsMarketAndCancelsOld(t *testing.T) {
@@ -224,9 +230,9 @@ func TestEngineNeedsCoinbaseBeforeQuoting(t *testing.T) {
 	lim.MaxSpotAge = 100 * time.Millisecond
 	eng, _, cancel := newTestEngine(t, src, mkt, lim)
 	defer cancel()
-	// one quote, then silence beyond the limit: halt
+	// one quote, then silence beyond the limit: pause
 	eng.Quotes() <- CoinbaseQuote{Rx: time.Now(), Bid: 76000, Ask: 76001}
-	waitFor(t, "spot-silence halt", func() bool { return eng.Stats().Halted != "" })
+	waitFor(t, "spot-silence pause", func() bool { return eng.Stats().Paused != "" })
 }
 
 func TestEngineSignalCancelsStaleSide(t *testing.T) {

@@ -87,8 +87,10 @@ func (r *Risk) RecordOrder(now time.Time) {
 	}
 }
 
-// Check evaluates the state limits; returns the halt reason if any (also sticky).
-func (r *Risk) Check(now time.Time, pos book.Qty, pnl float64, bookAge, spotAge time.Duration, seqGap bool) string {
+// Check evaluates the limits. Position, loss and a sequence gap are sticky
+// halts (returned as halt); feed silence is a pause (returned as pause) that
+// clears by itself once the feeds are healthy again.
+func (r *Risk) Check(now time.Time, pos book.Qty, pnl float64, bookAge, spotAge time.Duration, seqGap bool) (halt, pause string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	switch {
@@ -96,12 +98,14 @@ func (r *Risk) Check(now time.Time, pos book.Qty, pnl float64, bookAge, spotAge 
 		r.haltLocked(fmt.Sprintf("position %s beyond limit", pos))
 	case pnl < -r.L.MaxLoss:
 		r.haltLocked(fmt.Sprintf("session loss %.2f beyond limit", -pnl))
-	case bookAge > r.L.MaxBookAge:
-		r.haltLocked(fmt.Sprintf("kalshi book silent for %s", bookAge.Round(time.Millisecond)))
-	case spotAge > r.L.MaxSpotAge:
-		r.haltLocked(fmt.Sprintf("coinbase feed silent for %s", spotAge.Round(time.Millisecond)))
 	case seqGap:
 		r.haltLocked("sequence gap on the book feed")
 	}
-	return r.halted
+	switch {
+	case bookAge > r.L.MaxBookAge:
+		pause = fmt.Sprintf("kalshi book silent for %s", bookAge.Round(time.Millisecond))
+	case spotAge > r.L.MaxSpotAge:
+		pause = fmt.Sprintf("coinbase feed silent for %s", spotAge.Round(time.Millisecond))
+	}
+	return r.halted, pause
 }

@@ -33,10 +33,10 @@ func TestTokenBucket(t *testing.T) {
 
 func TestRiskLimitsAreStickyAndOrdered(t *testing.T) {
 	r := NewRisk(DefaultLimits())
-	if h := r.Check(t0, 100*100, -10, time.Second, time.Second, false); h != "" {
-		t.Fatalf("healthy state halted: %q", h)
+	if h, p := r.Check(t0, 100*100, -10, time.Second, time.Second, false); h != "" || p != "" {
+		t.Fatalf("healthy state halted/paused: %q %q", h, p)
 	}
-	if h := r.Check(t0, 250*100, 0, 0, 0, false); h == "" {
+	if h, _ := r.Check(t0, 250*100, 0, 0, 0, false); h == "" {
 		t.Fatal("position breach should halt")
 	}
 	first := r.Halted()
@@ -44,14 +44,23 @@ func TestRiskLimitsAreStickyAndOrdered(t *testing.T) {
 	if r.Halted() != first {
 		t.Fatalf("halt reason changed from %q to %q", first, r.Halted())
 	}
+	// feed silence pauses without sticking
+	r = NewRisk(DefaultLimits())
+	if h, p := r.Check(t0, 0, 0, 4*time.Second, 0, false); h != "" || p == "" {
+		t.Fatalf("book silence should pause, not halt: %q %q", h, p)
+	}
+	if h, p := r.Check(t0, 0, 0, 0, 6*time.Second, false); h != "" || p == "" {
+		t.Fatalf("spot silence should pause, not halt: %q %q", h, p)
+	}
+	if h, p := r.Check(t0, 0, 0, 0, 0, false); h != "" || p != "" {
+		t.Fatalf("pause must clear when feeds recover: %q %q", h, p)
+	}
 	for _, tc := range []struct {
 		name string
 		f    func(*Risk) string
 	}{
-		{"loss", func(r *Risk) string { return r.Check(t0, 0, -60, 0, 0, false) }},
-		{"book silence", func(r *Risk) string { return r.Check(t0, 0, 0, 4*time.Second, 0, false) }},
-		{"spot silence", func(r *Risk) string { return r.Check(t0, 0, 0, 0, 6*time.Second, false) }},
-		{"seq gap", func(r *Risk) string { return r.Check(t0, 0, 0, 0, 0, true) }},
+		{"loss", func(r *Risk) string { h, _ := r.Check(t0, 0, -60, 0, 0, false); return h }},
+		{"seq gap", func(r *Risk) string { h, _ := r.Check(t0, 0, 0, 0, 0, true); return h }},
 		{"errors", func(r *Risk) string {
 			for i := 0; i < 5; i++ {
 				r.RecordError()
