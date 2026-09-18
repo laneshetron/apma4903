@@ -553,3 +553,32 @@ The move is predictable — but by the state of the level, not by spot: `opp_siz
 | formed within 16 ms (our WS reaction) | 82% | 85% |
 
 A quarter of the new levels appear at the same tape timestamp as the vacate and half within 2 ms: the bid is placed by the party that pulled the ask, as one action (a maker rolling its quote). Nothing can be ahead of the actor who defines the event; a post-only cannot rest there beforehand (it crosses), and taking the ask on the prediction is a 1-tick trade against a 0.6–1.75¢ fee. The 15–18% of formations slower than 16 ms are the improves the existing rule already captures. This is the same fact as "the queue never drains" from the other side: the book is a few two-sided quoters rolling their quotes; a REST participant is either behind them or swept with them.
+
+## 2026-09-18 — where next: market survey, and the hindsight bound on a learned policy
+
+### Market survey (`survey.py`, 09-17, 568 markets)
+
+| series | markets | spread ¢ | touch size | touch life | refill ≤2 ms / ≤16 ms | contracts/h | sweep % | mo30 ¢ (maker, all touch trades) |
+|---|---|---|---|---|---|---|---|---|
+| KXBTC15M | 88 | 0.74 | 2,944 | 8 ms | **23% / 41%** | 10.4M | 23% | **+0.01** |
+| KXETH15M | 88 | 0.92 | 84 | 19 ms | **3% / 25%** | 421k | 44% | **+0.38** |
+| KXBTCD (hourly thresholds) | 392 | 1.36 | 1,254 | 212 ms | 2% / 24% | 30k | 29% | +0.10 |
+
+`refill ≤2 ms` = share of vacated touch levels re-created within 2 ms (the vacator rolling its quote). KXBTC15M is the only series with that signature, and its maker markout over *all* touch trades is zero: the average maker at the average trade earns nothing before queue position. KXETH15M: no rolling quoters, a 35× shorter queue, and +0.38¢/contract for makers net of a 44% sweep share; per market mo30 is positive in 15 of the top 20 (median +0.55¢, worst −0.18¢). KXBTCD are hourly markets (500–800k contracts/h, touch ~900, markouts mixed) — a slower BTC15M, not a patient maker's market.
+
+### Hindsight bound on a learned placement policy (`veto_gen.py`, `sim --veto`, 09-17, 56 markets, size 20)
+
+Presence-only action ("be on this side or not"), the sim's fill model as the environment. Oracle = perfect foresight of every sweep-through trade; learned = the vacate classifier (train 09-16, AUC 0.835 on 09-17) vetoing the resting side for 250 ms when p > threshold.
+
+| policy | $/mkt (t) | contracts | fill mo30 ¢ | sweep fills |
+|---|---|---|---|---|
+| baseline | −2.24 (−4.9) | 251,602 | −0.05 | 6,408 |
+| oracle, 50 ms warning | +2.61 (6.2) | 168,132 | +0.17 | 1,668 |
+| oracle, 250 ms warning | +3.59 (8.4) | 145,076 | +0.25 | 1,280 |
+| oracle, 1 s warning | +5.35 (12.2) | 102,740 | +0.49 | 529 |
+| oracle, adverse sweeps only, 250 ms | +3.28 (8.1) | 179,010 | +0.19 | 2,907 |
+| learned p > 0.3 (8.6% of time vetoed) | −0.57 (−1.3) | 180,096 | +0.01 | 3,556 |
+| learned p > 0.5 (3.5%) | −1.30 (−2.8) | 218,339 | −0.03 | 4,574 |
+| learned p > 0.7 (0.9%) | −1.93 (−4.3) | 240,447 | −0.06 | 5,622 |
+
+The bound is real: a clairvoyant presence policy earns +$2.6–5.4/market at size 20 on the same book where everything else loses — the whole loss is the sweeps, and dodging them with as little as 50 ms warning flips the sign. The learned policy recovers about a third of the gap at p > 0.3 (−2.24 → −0.57; sweep fills 6,408 → 3,556; markout −0.05 → +0.01) and is monotone in coverage, but does not cross zero: at AUC 0.835 the false positives (pulling from levels that survive, losing the +0.58¢ partials) cost about what the dodged sweeps save. To be worth deploying on BTC the classifier would need roughly AUC 0.9+ at the same horizon, or a cheaper action than pulling. On ETH the same machinery starts from a positive baseline (below).

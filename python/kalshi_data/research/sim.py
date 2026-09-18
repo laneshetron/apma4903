@@ -15,6 +15,7 @@ settlement.
 from __future__ import annotations
 
 import argparse
+import bisect
 import heapq
 import json
 import statistics as st
@@ -73,6 +74,7 @@ class Params:
     stale_feed_ms: float | None = None       # pull quotes while the latest Coinbase message arrived this late (rx - exchange ts)
     stop_before_s: float = 120.0
     signal_move: float | None = None  # $ over 1s on the spot mid; None disables
+    veto_file: str | None = None      # parquet of (ticker, side, start_rx, end_rx): presence veto on side while rx in [start, end)
     signal_improve: bool = False      # on a spot move, post-only at the old ask on the side the move favours (first at the level it vacates)
     signal_hold_ms: float = 2000.0    # how long a signal improve is exempt from the off-market cancel
     signal_place_latency_ms: float | None = None  # spot tick seen -> our post-only live (tape time); default signal + (place - cancel)
@@ -176,6 +178,12 @@ class Quoter:
         self.feed_lag_ms = 0.0   # delivery lag of the latest Coinbase message
         self.adverse_since: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": -1, "no": -1})
         self.level_born: dict[str, dict[tuple, int]] = defaultdict(dict)   # ticker -> (side, price) -> rx_ns the level appeared
+        self.veto: dict[tuple, tuple[list, list]] = {}   # (ticker, side) -> (starts, ends) sorted
+        if p.veto_file:
+            import polars as _pl
+            for (tk, sd), g in _pl.read_parquet(p.veto_file).sort("start_rx").group_by(["ticker", "side"], maintain_order=True):
+                self.veto[(tk, sd)] = (g["start_rx"].to_list(), g["end_rx"].to_list())
+
         self.probe_adv_qty = 0.0     # contracts by which live orders advanced
         self.probe_live_s = 0.0      # live-order seconds
         self.probe_ttf: list[float] = []      # seconds from activation to (first) fill
@@ -188,6 +196,20 @@ class Quoter:
         self.adverse_10s: float = 0.0   # dollars: mid move in the 10s after our fills, signed (negative = adverse)
 
     # ---- helpers -----------------------------------------------------------
+    def _vetoed(self, tk: str, s: str, rx: int) -> bool:
+        iv = self.veto.get((tk, s))
+        if iv is None:
+            return False
+        starts, ends = iv
+        i = bisect.bisect_right(starts, rx) - 1
+        # intervals may overlap: check back a few
+        j = i
+        while j >= 0 and i - j < 8:
+            if rx < ends[j]:
+                return True
+            j -= 1
+        return False
+
     def m(self, tk: str) -> MarketPnL:
         r = self.pnl.get(tk)
         if r is None:
@@ -516,6 +538,11 @@ class Quoter:
         if p.stale_feed_ms is not None and self.feed_lag_ms > p.stale_feed_ms:
             allow = {"yes": False, "no": False}
             self.vetoes["stale_feed"] += 2
+        if self.veto:
+            for s in ("yes", "no"):
+                if allow[s] and self._vetoed(tk, s, rx):
+                    allow[s] = False
+                    self.vetoes["ext_veto"] += 1
         if p.alpha_thr is not None and ctx is not None and ctx.alpha is not None:
             if ctx.alpha <= -p.alpha_thr and allow["yes"]:   # spot predicted down: our bid is stale
                 allow["yes"] = False
@@ -888,6 +915,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
         ctx.cb_series = SpotSeries()
     ctx.closes = closes
     asset = "ETH" if "ETH" in series else "BTC"
+    index_id = "ETHUSD_RTI" if asset == "ETH" else "BRTI"   # cfbenchmarks settlement index for the series
 
     signal_venues = set()
     for p in configs:
@@ -902,7 +930,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
     def cb_sizes():
         for rec in iter_records(data_dir / "spot" / "coinbase", day):
             raw = rec.raw
-            if raw.get("type") == "ticker" and raw.get("product_id") == "BTC-USD" and raw.get("best_bid_size"):
+            if raw.get("type") == "ticker" and raw.get("product_id") == f"{asset}-USD" and raw.get("best_bid_size"):
                 yield ("cbsz", rec.rx_ns, float(raw["best_bid_size"]), float(raw["best_ask_size"]))
 
     n = 0
@@ -947,12 +975,12 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
                     q.on_tick(live, rx, mid, ago, ctx, books)
             continue
         raw = rec.raw
-        if raw.get("type") == "cfbenchmarks_value" and raw["msg"].get("index_id") == "BRTI":
+        if raw.get("type") == "cfbenchmarks_value" and raw["msg"].get("index_id") == index_id:
             a = raw["msg"].get("avg_60s_data")
             if a:
                 avg60.append((int(a["window_end_ts_exclusive"]), float(a["value"])))
             continue
-        if raw.get("type") == "cfbenchmarks_value_5hz" and raw["msg"].get("index_id") == "BRTI":
+        if raw.get("type") == "cfbenchmarks_value_5hz" and raw["msg"].get("index_id") == index_id:
             v = float(json.loads(raw["msg"]["data"])["value"])
             spot.on_brti(rx, v)
             if ctx.brti_series is not None:
@@ -1221,6 +1249,38 @@ SIZES = [
     *[Params(f"depth 1000, size {n} / cap {2*n}, {q}, unlimited capital", **_D, size=n, max_pos=2*n, queue=q) for q in ("prorata", "pessimistic") for n in (50, 100)],
 ]
 
+# KXETH15M under the corrected model: no BTC-fitted join tables, touch ~80 contracts so depth gates are scaled down
+_E = dict(signal_move=2.0, stop_before_s=300, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
+          place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, size=20, max_pos=20, capital=100, flatten_at_stop=True)
+ETHSET = [
+    Params("ETH touch joiner, greeks cap, signal cancel", **_E),
+    Params("ETH no gates at all", **{**_E, "greeks_cap": None, "signal_move": None}),
+    Params("ETH signal cancel $20/1s (ETH scale)", **{**_E, "signal_move": 20.0}),
+    Params("ETH depth >= 50", **_E, min_depth=50),
+    Params("ETH depth >= 100", **_E, min_depth=100),
+    Params("ETH depth >= 200", **_E, min_depth=200),
+    Params("ETH size 5 / cap 5", **{**_E, "size": 5, "max_pos": 5}),
+    Params("ETH size 50 / cap 50", **{**_E, "size": 50, "max_pos": 50}),
+    Params("ETH touch joiner, pessimistic queue", **_E, queue="pessimistic"),
+    Params("ETH depth >= 100, pessimistic queue", **_E, min_depth=100, queue="pessimistic"),
+]
+
+# hindsight / learned presence policies via external veto intervals (research/veto_*.parquet)
+_V = dict(signal_move=2.0, stop_before_s=300, join_theta=0.0, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
+          place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, size=20, max_pos=20, capital=100, flatten_at_stop=True)
+def _veto_set(day: str) -> list:
+    R = "../research/"
+    return [
+        Params("baseline", **_V),
+        Params("oracle: dodge every sweep-through, 50 ms warning", **_V, veto_file=f"{R}veto_oracle50_{day}.parquet"),
+        Params("oracle: dodge every sweep-through, 250 ms warning", **_V, veto_file=f"{R}veto_oracle250_{day}.parquet"),
+        Params("oracle: dodge every sweep-through, 1 s warning", **_V, veto_file=f"{R}veto_oracle1000_{day}.parquet"),
+        Params("oracle: dodge adverse fills only (mo30 < 0), 250 ms", **_V, veto_file=f"{R}veto_oracleadv250_{day}.parquet"),
+        Params("learned: vacate model p>0.5 @250 ms (walk-forward)", **_V, veto_file=f"{R}veto_model50_{day}.parquet"),
+        Params("learned: vacate model p>0.3 @250 ms", **_V, veto_file=f"{R}veto_model30_{day}.parquet"),
+        Params("learned: vacate model p>0.7 @250 ms", **_V, veto_file=f"{R}veto_model70_{day}.parquet"),
+    ]
+
 # spot-triggered improve: post-only at the vacating touch on the spot trigger (first at the new level)
 _S = dict(stop_before_s=300, join_theta=0.0, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
           place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, size=20, max_pos=20, capital=100, flatten_at_stop=True)
@@ -1404,12 +1464,14 @@ def main() -> None:
     ap.add_argument("--eval3", action="store_true", help="depth-gate threshold sweep")
     ap.add_argument("--eval4", action="store_true", help="depth gate under the pessimistic (no advancement) queue")
     ap.add_argument("--baseline", action="store_true", help="the live/paper configuration only (for paper_vs_sim)")
+    ap.add_argument("--eth", action="store_true", help="KXETH15M configuration set (use --series KXETH15M)")
+    ap.add_argument("--veto", action="store_true", help="hindsight and learned presence policies (needs research/veto_*.parquet for the day)")
     ap.add_argument("--sigimp", action="store_true", help="spot-triggered improve study")
     ap.add_argument("--latency2", action="store_true", help="latency sweep under the corrected model")
     ap.add_argument("--sizes", action="store_true", help="depth 1000 size sweep under both queue models")
     ap.add_argument("--depth1000", action="store_true", help="the paper configuration from 2026-09-17 16:22 UTC: baseline + min depth 1000")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else SIGIMP if a.sigimp else LATENCY2 if a.latency2 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else ETHSET if a.eth else _veto_set(str(a.day)) if a.veto else SIGIMP if a.sigimp else LATENCY2 if a.latency2 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
