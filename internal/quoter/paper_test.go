@@ -3,6 +3,7 @@ package quoter
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -253,5 +254,37 @@ func TestPaperTakeFillsAtPriceWithFee(t *testing.T) {
 	pos, cash := l.Position()
 	if pos != -60*100 || cash < 30-1.05-1e-9 || cash > 30-1.05+1e-9 {
 		t.Fatalf("selling 60 YES at 50c less the fee: pos %v cash %v", pos, cash)
+	}
+}
+
+// A cancel's reduced_by must reflect trades received before cancelAt+FeedLag even
+// when the event loop applies them late: Cancel waits for the executor to have
+// processed events up to that instant.
+func TestPaperCancelWaitsForLateTrades(t *testing.T) {
+	b := mkBook(5000, 0, 4900, 100000)
+	var fills []Fill
+	var mu sync.Mutex
+	p := NewPaperExecutor(0, 0, func(string) (*book.Book, bool) { return b, true }, func(_ string, f Fill) { mu.Lock(); fills = append(fills, f); mu.Unlock() })
+	p.FeedLag = 20 * time.Millisecond
+	id, _, err := p.Place(context.Background(), "M", book.Yes, 5000, 10*100, "c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	// a trade that happened at the engine just now (before the cancel) but is applied 30 ms later
+	tradeRx := time.Now().Add(p.FeedLag)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		p.OnTrade(tradeRx, "M", 5000, 4*100, "no", 1)
+		p.Tick(tradeRx.Add(time.Millisecond))
+	}()
+	_, reduced, err := p.Cancel(context.Background(), "M", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(fills) != 1 || reduced != 6*100 {
+		t.Fatalf("cancel should see the late trade: fills=%v reduced=%v", fills, reduced)
 	}
 }

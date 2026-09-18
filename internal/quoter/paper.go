@@ -29,7 +29,8 @@ type PaperExecutor struct {
 	mu            sync.Mutex
 	nextID        int
 	nextFill      int
-	priorityFills int // fills received only because a trade went through our level
+	priorityFills int       // fills received only because a trade went through our level
+	processed     time.Time // receipt time of the latest public event applied (OnDelta / OnTrade / Tick)
 	orders        map[string]*paperOrder
 	// negative deltas at a level awaiting the trade that explains them
 	pending map[levelKey][]pendingDelta
@@ -70,6 +71,12 @@ func (o *paperOrder) fillable(rx time.Time, feedLag time.Duration) bool {
 func NewPaperExecutor(placeLat, cancelLat time.Duration, bookFn func(string) (*book.Book, bool), onFill func(string, Fill)) *PaperExecutor {
 	return &PaperExecutor{PlaceLatency: placeLat, CancelLatency: cancelLat, Book: bookFn, OnFill: onFill,
 		orders: map[string]*paperOrder{}, pending: map[levelKey][]pendingDelta{}}
+}
+
+func (p *PaperExecutor) markLocked(rx time.Time) {
+	if rx.After(p.processed) {
+		p.processed = rx
+	}
 }
 
 // gc drops cancelled orders once no in-flight trade can still reach them.
@@ -124,10 +131,23 @@ func (p *PaperExecutor) Cancel(ctx context.Context, _ string, orderID string) (t
 	o.cancelAt = time.Now()
 	p.mu.Unlock()
 	if p.FeedLag > 0 {
-		select {
-		case <-time.After(p.FeedLag):
-		case <-ctx.Done():
-			return time.Time{}, 0, ctx.Err()
+		// wait until the event loop has applied every public event received before
+		// cancelAt+FeedLag (a trade that beat the cancel can arrive that late); the
+		// engine's 100 ms Tick bounds the wait when the feed is quiet
+		until := o.cancelAt.Add(p.FeedLag)
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for {
+			p.mu.Lock()
+			done := !p.processed.Before(until)
+			p.mu.Unlock()
+			if done || time.Now().After(deadline) {
+				break
+			}
+			select {
+			case <-time.After(time.Millisecond):
+			case <-ctx.Done():
+				return time.Time{}, 0, ctx.Err()
+			}
 		}
 	}
 	p.mu.Lock()
@@ -195,6 +215,7 @@ func (p *PaperExecutor) OnDelta(rx time.Time, ticker string, side book.Side, pri
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.gcLocked(rx)
+	p.markLocked(rx)
 	if delta > 0 {
 		// an add we see within FeedLag of going live reached the engine before we did
 		for _, o := range p.orders {
@@ -271,6 +292,7 @@ func (p *PaperExecutor) OnTrade(rx time.Time, ticker string, yesPrice book.Price
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.gcLocked(rx)
+	p.markLocked(rx)
 	if !p.anyOrderOnSide(k) {
 		return
 	}
@@ -348,6 +370,7 @@ func (p *PaperExecutor) Tick(now time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.gcLocked(now)
+	p.markLocked(now)
 	for k := range p.pending {
 		if len(p.pending[k]) > 0 {
 			p.flushLocked(now, k)

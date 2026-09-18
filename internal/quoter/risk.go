@@ -11,6 +11,7 @@ import (
 // Limits are the hard stops. Any breach halts quoting and cancels everything.
 type Limits struct {
 	MaxAbsPos       book.Qty      // absolute position, qty units
+	PosSlack        book.Qty      // overshoot tolerated beyond MaxAbsPos before halting (one quote size)
 	MaxLoss         float64       // $ mark-to-market loss for the session
 	MaxBookAge      time.Duration // Kalshi book silence before we consider the feed dead
 	MaxSpotAge      time.Duration // Coinbase silence before we stop (the cancel signal is blind)
@@ -94,7 +95,11 @@ func (r *Risk) Check(now time.Time, pos book.Qty, pnl float64, bookAge, spotAge 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	switch {
-	case pos > r.L.MaxAbsPos || pos < -r.L.MaxAbsPos:
+	case pos > r.L.MaxAbsPos+r.L.PosSlack || pos < -r.L.MaxAbsPos-r.L.PosSlack:
+		// one fill race (a cancelled order filled before the cancel while its
+		// replacement was already in flight) can overshoot the cap by one quote
+		// size; the strategy stops adding at the cap and the endgame flattens, so
+		// only a larger overshoot is a fault
 		r.haltLocked(fmt.Sprintf("position %s beyond limit", pos))
 	case pnl < -r.L.MaxLoss:
 		r.haltLocked(fmt.Sprintf("session loss %.2f beyond limit", -pnl))

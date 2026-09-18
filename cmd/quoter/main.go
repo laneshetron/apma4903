@@ -101,6 +101,7 @@ func run() error {
 	params.MinDepth = book.Qty(*minDepth * 100)
 	limits := quoter.DefaultLimits()
 	limits.MaxAbsPos = book.Qty(*maxPos * 100)
+	limits.PosSlack = book.Qty(*size * 100)
 	limits.MaxLoss = *maxLoss
 
 	rec, err := recorder.Open(filepath.Join(cfg.DataDir, "quoter", *mode), time.Second)
