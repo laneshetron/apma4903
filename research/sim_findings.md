@@ -616,3 +616,25 @@ The toxic window is **5–50 ms after a price becomes the touch**, on both books
 Diagnostic variants (09-17): ETH join-only −3.42, improve-only −1.57, pre-position 1 tick −0.45, persistence −6.65; BTC join-only −2.12, improve-only −0.27, pre-position −2.45, persistence −3.64. Nothing positive, but the ranking says volume is the enemy: every variant that trades less loses less.
 
 Open question being tested (`sim --old`): quote **only** prices that have been the touch ≥ 50/200/500/1000 ms and hold while they remain the touch. Every fill would then be in the +0.2…+1.0¢ class, but at an old touch we join the back of a long queue — whether any volume survives is the test.
+
+### The established-touch rule fails (`sim --old`, 09-17)
+
+Quote only prices that have been the touch for ≥ N ms, hold while they remain the touch (no improves):
+
+| config | ETH $/mkt (t) | BTC $/mkt (t) | ETH fill mo30 | BTC fill mo30 |
+|---|---|---|---|---|
+| baseline touch joiner | −5.35 (−14.8) | −2.43 (−5.1) | −0.27¢ | −0.06¢ |
+| touch age ≥ 50 ms | −3.10 | −2.13 | −0.22¢ | −0.06¢ |
+| touch age ≥ 200 ms | −3.27 | −2.16 | −0.25¢ | −0.07¢ |
+| touch age ≥ 500 ms | −2.53 | −2.06 | −0.30¢ | −0.06¢ |
+| touch age ≥ 1000 ms | −1.88 | −1.79 | −0.30¢ | −0.10¢ |
+| ≥ 200 ms, improves allowed | −4.95 | −2.73 | −0.28¢ | −0.09¢ |
+| ≥ 200 ms + depth gate | **+0.11 (0.2)** | −0.53 | +0.02¢ | 0.00¢ |
+| ≥ 200 ms, size 5 | −0.67 | −0.60 | −0.21¢ | −0.08¢ |
+| ≥ 200 ms, pessimistic queue | −3.39 | −4.55 | −0.38¢ | −0.27¢ |
+
+The decisive number is the fill markout: restricting ourselves to established touch prices does **not** improve it (ETH −0.27 → −0.25¢; BTC −0.06 → −0.07¢), even though trades at those prices are worth +0.46¢ to the market's makers. Waiting for an old touch puts us at the back of a long queue, and the only flow that reaches the back of a queue is a sweep — so we change which levels we stand on without changing which trades reach us. The one non-negative cell (ETH, ≥ 200 ms + depth gate, +$0.11/market, t 0.2, 221 contracts/market) is flat, on one day, out of ~40 configurations tested — noise, not an edge.
+
+**Conclusion for passive quoting on Kalshi 15-minute crypto.** Under the corrected model, across two series, two days, ~40 configurations, three live sessions and every rule the data suggested (depth, level age, touch age, persistence, offset, size skew, spot triggers, latency to the physical floor, hindsight and learned presence policies), nothing is reliably positive. The reason is structural and now measured from three independent angles: benign flow goes to the front of the queue, which is held by participants who re-create levels within 0–2 ms of vacating them; what reaches a 15 ms-latency REST participant at the back of the queue is the sweep, which marks out at −0.3 to −0.9¢. The only configurations that reach zero are the ones that barely trade. Recommend stopping this line of work rather than testing further variants.
+
+What is *not* ruled out, as separate businesses rather than refinements: (a) taking in the final minute against the BRTI 60-second settlement average, where the partial average is known and the book may not price it (we have the 5 Hz index feed; never studied because we stop quoting at T−5 min); (b) the hourly KXBTCD markets with a fair-value surface and hour-scale inventory (1.4¢ spreads, 200 ms touch lifetimes, no rolling quoters, +0.26¢ maker markout in the tails). Both need a fresh decision, not a continuation.
