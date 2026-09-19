@@ -653,3 +653,16 @@ Model: P(YES | t s before close) = Φ((known part of the 60 s average + t·S −
 | **ETH 09-18 (out of sample)** | 44 | **−2.81** | −1.1 | 77% | 0.078 / 0.065 |
 
 The in-sample edge was the book being less confident than a random walk 2–3 min before close ("market prices more vol than realized"), i.e. buying the favourite. On 09-18 the favourite lost more often (win 77% vs 93%), the model's Brier is worse than the book's in every window, and both series lose $2–5/market at every threshold. Two days in a row of realized vol below the book's implied looked like an edge; the third day, with more moves, shows the book's extra vol premium is correct on average — it is paying for the fat tail the normal model ignores (the tail study on 09-14 already found t(3–4)-like realized tails). Not an edge; a vol-regime bet. Nothing of the settlement mechanics themselves showed up: the windows where the average is partly known (T−60 onward) are flat or too thin to trade.
+
+## 2026-09-19 — hourly BTC strips (KXBTCD) under the corrected model
+
+KXBTCD = strips of strikes settling every hour on the 60 s BRTI average, each strike alive ~25 h, `linear_cent` grid. Sim changes for it: linear tick, capital shared across all open strikes ($300), a time-to-close window for which strikes to quote, collateral released at each strike's settlement during the run (the first pass locked up on carried deep-in-the-money positions and traded nothing for half the day). 09-17 tape, size 20 / cap 20 per strike:
+
+| config | strikes quoted | $/strike (t) | win % | contracts/strike | fill mo30 |
+|---|---|---|---|---|---|
+| strikes closing ≤ 1 h | 329 | −0.60 (−3) | 54% | 775 | −0.01¢ |
+| strikes closing ≤ 3 h | 335 | −0.60 | 53% | 761 | −0.01¢ |
+| ≤ 3 h, pessimistic queue | 321 | −0.94 | 50% | 528 | −0.16¢ |
+| ≤ 3 h, no gates (first pass) | 75 | −2.59 (−4.2) | | 1,370 | −0.16¢ |
+
+Fill mix (≤ 1 h): join-partial 55% of contracts at **+0.05¢**, improve-partial 20% at **+0.29¢**, improve-sweep 13% at −0.08¢, join-sweep 12% at **−0.95¢**. Unlike the 15-minute books the queue does turn over here (partials are more than half our volume and mildly positive), but the join-sweeps cost as much as everything else earns, and the net is −$0.6/strike-hour, negative in 16 of 20 hours of the day. The survey's +0.10¢ market-wide maker markout on this series is, for a REST joiner, ≈ 0 before and slightly negative after the sweeps. Not a market for the touch-joiner either.

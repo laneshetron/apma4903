@@ -727,6 +727,23 @@ class Quoter:
                     if p.dfair_cancel_c is not None and ctx is not None:
                         orders[s].fair_at_place = ctx.fair_c(tk, rx, close_ns, p.fair_spot, p.vol_mult, p.kernel)
 
+    def settle_now(self, tk: str, v: float) -> None:
+        """The market settled at v (0/1) while the run continues: realise any position and free its collateral."""
+        r = self.pnl.get(tk)
+        if r is None:
+            return
+        if r.pos != 0:
+            r.cash += r.pos / QTY * v
+            r.pos = 0
+            r.settle = v
+        if r.mark_pnl is not None or r.fills:
+            r.mark_pnl = r.cash
+            if r.stop_rx is None:
+                r.stop_rx = 0
+        self.stopped.add(tk)
+        for o in self.orders.pop(tk, {}).values():
+            pass   # resting orders die with the market
+
     def resolve(self, settles: dict[str, float]) -> None:
         """Mark positions carried past the stop at the settlement value instead of the stop-time mid."""
         for tk, r in self.pnl.items():
@@ -985,6 +1002,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
         ctx.brti_series = SpotSeries()
         ctx.cb_series = SpotSeries()
     ctx.closes = closes
+    closing: dict[int, list[str]] = defaultdict(list)   # close ms -> tickers, for settle-on-close
     asset = "ETH" if "ETH" in series else "BTC"
     index_id = "ETHUSD_RTI" if asset == "ETH" else "BRTI"   # cfbenchmarks settlement index for the series
 
@@ -1054,7 +1072,15 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
         if raw.get("type") == "cfbenchmarks_value" and raw["msg"].get("index_id") == index_id:
             a = raw["msg"].get("avg_60s_data")
             if a:
-                avg60.append((int(a["window_end_ts_exclusive"]), float(a["value"])))
+                end_ms = int(a["window_end_ts_exclusive"])
+                avg60.append((end_ms, float(a["value"])))
+                for tk_c in closing.pop(end_ms, ()):
+                    K = strikes.get(tk_c)
+                    if K is None:
+                        continue
+                    v = 1.0 if float(a["value"]) > K else 0.0
+                    for q in quoters:
+                        q.settle_now(tk_c, v)
             continue
         if raw.get("type") == "cfbenchmarks_value_5hz" and raw["msg"].get("index_id") == index_id:
             v = float(json.loads(raw["msg"]["data"])["value"])
@@ -1081,6 +1107,7 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
                 continue
             b = books[tk] = FastBook()
             closes[tk] = int(ct * 1e9)
+            closing[closes[tk] // 1_000_000].append(tk)
         if t == "orderbook_snapshot":
             b.snapshot(msg)
             for q in quoters:
