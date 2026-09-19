@@ -44,3 +44,13 @@ Runs `kalshi-quoter-paper` (and `kalshi-quoter-live` when enabled) only; the rec
 Build with `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o build/arm64/quoter ./cmd/quoter`.
 Latency checks: `deploy/azprobe.py` (network) and the paper tape's `ack_ms - 9` (scheduling delay; ~1 ms p50 is
 Go timer granularity, watch p90/p99). Measured 2026-09-17: p50 1.2 / p90 2.3 / p99 7.5 ms.
+
+## Exchange-wide recorder (micro, `kalshi-collector-broad`)
+
+Records every open market with >= 1000 contracts of 24 h volume (~5,700 markets, ~900 series; the
+combo series and the crypto series already covered by `kalshi-collector` are excluded) via
+`markets.all_min_volume_24h` in `config_broad.yaml`; the set is re-listed every 15 min from
+`/events?with_nested_markets=true`. Data under `/opt/kalshi/data/broad` (so `deploy/sync.sh` picks
+it up into `data_aws/broad`), status on `:8084`, log `logs/collector-broad.log`, Nice=5 so the crypto
+collector keeps priority. Screen the result with
+`uv run python -m kalshi_data.research.survey <day> --data-dir ../data_aws/broad --series <...>`.

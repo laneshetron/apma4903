@@ -1,0 +1,18 @@
+[Unit]
+Description=Kalshi exchange-wide market-data collector (24h volume >= 1000)
+After=network-online.target chronyd.service
+Wants=network-online.target
+
+[Service]
+User=kalshi
+WorkingDirectory=/opt/kalshi
+ExecStart=/opt/kalshi/bin/collector-broad -config /opt/kalshi/config_broad.yaml
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+Nice=5
+StandardOutput=append:/opt/kalshi/logs/collector-broad.log
+StandardError=append:/opt/kalshi/logs/collector-broad.log
+
+[Install]
+WantedBy=multi-user.target

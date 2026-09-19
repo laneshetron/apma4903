@@ -86,7 +86,7 @@ func run(cfgPath string) error {
 		_ = srv.Shutdown(sctx)
 	}()
 
-	if len(cfg.Markets.Series) > 0 {
+	if len(cfg.Markets.Series) > 0 || cfg.Markets.AllMinVolume24h > 0 {
 		go every(ctx, cfg.Markets.RefreshInterval, func() {
 			t, err := resolveMarkets(ctx, rest, cfg)
 			if err != nil {
@@ -120,6 +120,15 @@ func resolveMarkets(ctx context.Context, rest *kalshi.REST, cfg *config.Config) 
 	}
 	for _, s := range cfg.Markets.Series {
 		ms, err := rest.ListOpenMarkets(ctx, s)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range ms {
+			set[m.Ticker] = struct{}{}
+		}
+	}
+	if cfg.Markets.AllMinVolume24h > 0 {
+		ms, err := rest.ListActiveMarkets(ctx, cfg.Markets.AllMinVolume24h, cfg.Markets.ExcludeSeries)
 		if err != nil {
 			return nil, err
 		}

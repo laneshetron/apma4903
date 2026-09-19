@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/laneshetron/kalshi/internal/kalshi/gen"
@@ -84,6 +85,46 @@ func (r *REST) ListOpenMarkets(ctx context.Context, series string) ([]gen.Market
 			return out, nil
 		}
 		params.Cursor = resp.JSON200.Cursor
+	}
+}
+
+// ListActiveMarkets returns every open market on the exchange with 24 h volume
+// >= minVolume contracts, via the events listing with nested markets (one
+// page per 200 events; ~80 pages for the whole exchange). Series in exclude
+// are skipped.
+func (r *REST) ListActiveMarkets(ctx context.Context, minVolume float64, exclude []string) ([]gen.Market, error) {
+	skip := map[string]bool{}
+	for _, s := range exclude {
+		skip[s] = true
+	}
+	var out []gen.Market
+	limit := 200
+	status := gen.GetEventsParamsStatus("open")
+	params := &gen.GetEventsParams{Status: &status, Limit: &limit, WithNestedMarkets: true}
+	for {
+		resp, err := r.c.GetEventsWithResponse(ctx, params)
+		if err != nil {
+			return nil, fmt.Errorf("kalshi: list events: %w", err)
+		}
+		if resp.JSON200 == nil {
+			return nil, httpError("list events", resp.HTTPResponse, resp.Body)
+		}
+		for _, e := range resp.JSON200.Events {
+			if skip[e.SeriesTicker] {
+				continue
+			}
+			for _, m := range e.Markets {
+				v, err := strconv.ParseFloat(string(m.Volume24hFp), 64)
+				if err == nil && v >= minVolume {
+					out = append(out, m)
+				}
+			}
+		}
+		if resp.JSON200.Cursor == "" {
+			return out, nil
+		}
+		c := resp.JSON200.Cursor
+		params.Cursor = &c
 	}
 }
 

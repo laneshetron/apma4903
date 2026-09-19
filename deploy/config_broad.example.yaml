@@ -1,0 +1,12 @@
+env: prod
+markets:
+  tickers: []
+  series: []
+  all_min_volume_24h: 1000        # every open market on the exchange with >= 1000 contracts in the last 24 h
+  exclude_series: [KXMVECROSSCATEGORY, KXMVECROSSCATEGORY0, KXBTC15M, KXETH15M, KXBTCD]   # combos; crypto is recorded by the other collector
+  refresh_interval: 15m
+channels: [orderbook_delta, trade]
+index_ids: []
+data_dir: /opt/kalshi/data/broad
+status_addr: 127.0.0.1:8084
+rest_check_interval: 0s

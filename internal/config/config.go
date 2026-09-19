@@ -21,6 +21,11 @@ type Config struct {
 		Tickers         []string      `yaml:"tickers"`
 		Series          []string      `yaml:"series"`
 		RefreshInterval time.Duration `yaml:"refresh_interval"`
+		// AllMinVolume24h > 0 records every open market on the exchange whose
+		// 24 h volume is at least this many contracts (listed via /events with
+		// nested markets), in addition to Tickers and Series.
+		AllMinVolume24h float64  `yaml:"all_min_volume_24h"`
+		ExcludeSeries   []string `yaml:"exclude_series"`
 	} `yaml:"markets"`
 	Channels          []string      `yaml:"channels"`
 	IndexIDs          []string      `yaml:"index_ids"`
@@ -75,7 +80,7 @@ func Load(path string) (*Config, error) {
 	if c.KeyID == "" || c.PrivateKeyPath == "" {
 		return nil, errors.New("config: KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH must be set (see .env.example)")
 	}
-	if len(c.Markets.Tickers)+len(c.Markets.Series) == 0 {
+	if len(c.Markets.Tickers)+len(c.Markets.Series) == 0 && c.Markets.AllMinVolume24h <= 0 {
 		return nil, errors.New("config: no markets.tickers or markets.series configured")
 	}
 	return c, nil
