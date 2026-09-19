@@ -24,6 +24,8 @@ import argparse
 import heapq
 import json
 import math
+import re
+import time
 import sys
 import urllib.request
 from collections import deque
@@ -180,17 +182,43 @@ class FeatureAnalyzer(Analyzer):
         sw.feats = f
 
 
+_STRIKE_CACHE = Path("../research/strikes_cache.json")
+_TICKER_STRIKE = re.compile(r"-[TB](\d+(?:\.\d+)?)$")   # KXBTCD-26SEP1717-T76499.99 -> 76499.99
+
+
 def fetch_strikes(tickers: list[str]) -> dict[str, float]:
     out = {}
+    cache = {}
+    try:
+        cache = json.loads(_STRIKE_CACHE.read_text())
+    except Exception:  # noqa: BLE001
+        pass
+    todo = []
     for t in tickers:
+        m = _TICKER_STRIKE.search(t)
+        if m:
+            out[t] = float(m.group(1))
+        elif t in cache:
+            out[t] = cache[t]
+        else:
+            todo.append(t)
+    for t in todo:
         try:
             with urllib.request.urlopen(f"{BASE}/markets/{t}", timeout=20) as r:
                 m = json.load(r)["market"]
             k = m.get("floor_strike") or m.get("cap_strike")
             if k is not None:
                 out[t] = float(k)
+                cache[t] = float(k)
+            time.sleep(0.12)
         except Exception as e:  # noqa: BLE001
             print(f"strike {t}: {e}", file=sys.stderr)
+            time.sleep(1.0)
+    if todo:
+        try:
+            _STRIKE_CACHE.write_text(json.dumps(cache))
+        except Exception:  # noqa: BLE001
+            pass
     return out
 
 

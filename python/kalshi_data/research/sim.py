@@ -199,6 +199,7 @@ class Quoter:
         self.adverse_since: dict[str, dict[str, int]] = defaultdict(lambda: {"yes": -1, "no": -1})
         self.level_born: dict[str, dict[tuple, int]] = defaultdict(dict)   # ticker -> (side, price) -> rx_ns the level appeared
         self.veto: dict[tuple, tuple[list, list]] = {}   # (ticker, side) -> (starts, ends) sorted
+        self._locked_cache: tuple = (None, 0.0)
         if p.veto_file:
             import polars as _pl
             for (tk, sd), g in _pl.read_parquet(p.veto_file).sort("start_rx").group_by(["ticker", "side"], maintain_order=True):
@@ -219,8 +220,11 @@ class Quoter:
         self.adverse_10s: float = 0.0   # dollars: mid move in the 10s after our fills, signed (negative = adverse)
 
     # ---- helpers -----------------------------------------------------------
-    def _locked_all(self, exclude_tk: str) -> float:
-        """Collateral held in every other market: net positions plus resting orders."""
+    def _locked_all(self, exclude_tk: str, rx: int = 0) -> float:
+        """Collateral held in every other market: net positions plus resting orders (recomputed at most once per 200 ms)."""
+        key = (exclude_tk, rx // 200_000_000)
+        if self._locked_cache[0] == key:
+            return self._locked_cache[1]
         tot = 0.0
         for t, r in self.pnl.items():
             if t != exclude_tk and r.pos != 0:
@@ -228,6 +232,7 @@ class Quoter:
         for t, od in self.orders.items():
             if t != exclude_tk:
                 tot += sum(x.price / ONE * x.remaining / QTY for x in od.values() if x.cancel_at is None)
+        self._locked_cache = (key, tot)
         return tot
 
     def _vetoed(self, tk: str, s: str, rx: int) -> bool:
@@ -352,6 +357,8 @@ class Quoter:
             self.level_born[tk][(side, price)] = rx
         elif after == 0:
             self.level_born[tk].pop((side, price), None)
+        if self.p.max_ttx_h is not None and close_ns - rx > self.p.max_ttx_h * 3.6e12 and not self.orders[tk] and r.pos == 0:
+            return   # far from close, nothing resting, nothing held: the decision would be vetoed anyway
         o = self.orders[tk].get(side)
         if o is not None and o.price == price:
             if o.ahead is None and rx >= o.active_from:
@@ -708,7 +715,7 @@ class Quoter:
                         size = max(QTY, int(self.p.size * frac) * QTY)   # increasing side shrinks toward 1 lot at the cap
                     if p.capital is not None:
                         reserved = sum(x.price / ONE * x.remaining / QTY for x in orders.values() if x.cancel_at is None)
-                        free = p.capital - r.locked() - reserved - (self._locked_all(tk) if p.global_capital else 0.0)
+                        free = p.capital - r.locked() - reserved - (self._locked_all(tk, rx) if p.global_capital else 0.0)
                         other_needs = 1 if (allow[("no" if s == "yes" else "yes")] and ("no" if s == "yes" else "yes") not in orders) else 0
                         budget = free / (1 + other_needs)
                         afford = int(budget / (want[s] / ONE)) if want[s] > 0 else 0
@@ -951,7 +958,8 @@ class Context:
 # ------------------------------------------------------------------- driver ---
 
 def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params],
-        alpha_parquet: Path | None = None, train_frac: float = 0.6) -> tuple[list[dict], int]:
+        alpha_parquet: Path | None = None, train_frac: float = 0.6, checkpoint=None) -> tuple[list[dict], int]:
+    """checkpoint(results) is called every 10M records with the summaries so far (markets completed to that point)."""
     quoters = [Quoter(p) for p in configs]
     books: dict[str, FastBook] = {}
     closes: dict[str, int] = {}
@@ -1003,6 +1011,11 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
         n += 1
         if n % 5_000_000 == 0:
             print(f"  {n/1e6:.0f}M records", file=sys.stderr)
+            if checkpoint is not None and n % 10_000_000 == 0:
+                try:
+                    checkpoint([q.summary(test_from) for q in quoters])
+                except Exception as e:  # noqa: BLE001
+                    print(f"  checkpoint failed: {e}", file=sys.stderr)
         if isinstance(rec, tuple):
             spot.on_quote_sizes(rec[2], rec[3])
             continue
@@ -1334,7 +1347,6 @@ _HR = dict(signal_move=2.0, stop_before_s=300, greeks_cap=0.05, price_priority=T
 HOURLY = [
     Params("hourly: all strikes, ttx <= 1 h", **_HR, max_ttx_h=1),
     Params("hourly: all strikes, ttx <= 3 h", **_HR, max_ttx_h=3),
-    Params("hourly: all strikes, ttx <= 12 h", **_HR, max_ttx_h=12),
     Params("hourly: ttx <= 3 h, no signal cancel", **{**_HR, "signal_move": None}, max_ttx_h=3),
     Params("hourly: ttx <= 3 h, no gates", **{**_HR, "signal_move": None, "greeks_cap": None}, max_ttx_h=3),
     Params("hourly: ttx <= 3 h, carry to settlement", **{**_HR, "flatten_at_stop": False}, max_ttx_h=3),
@@ -1591,8 +1603,19 @@ def main() -> None:
         i, n = (int(x) for x in a.chunk.split("/"))
         per = -(-len(configs) // n)
         configs = configs[(i - 1) * per:i * per]
+    def checkpoint(partial):
+        if not a.out:
+            return
+        rows = [f"# PARTIAL — {a.series} {a.day}, markets completed so far", "", "| config | markets | pnl_$ | pnl_per_market_$ | t_stat | contracts | fill_markout_30s_c |", "|---|---|---|---|---|---|---|"]
+        for r in partial:
+            if r.get("markets", 0) == 0:
+                rows.append(f"| {r['name']} | 0 | | | | | |")
+                continue
+            rows.append(f"| {r['name']} | {r['markets']} | {r['pnl_$']:.2f} | {r['pnl_per_market_$']:.2f} | {r['t_stat']:.2f} | {r['contracts']:,.0f} | {r['fill_markout_30s_c']:.2f} |")
+        Path(str(a.out) + ".partial.md").write_text("\n".join(rows))
+
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
-                         train_frac=1.0 if a.tables_from else 0.6)
+                         train_frac=1.0 if a.tables_from else 0.6, checkpoint=checkpoint)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
     L = [f"# Quoter simulation, {a.series}, {a.day}", "",
          "Touch quoter, 100 contracts/side unless noted, max position 500, quoting stops 2 min before expiry, inventory marked at mid. "

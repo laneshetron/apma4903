@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import json
+import random
 import statistics as st
 import sys
 from collections import defaultdict, deque
@@ -39,7 +41,7 @@ QTY = 100
 
 class MStat:
     __slots__ = ("book", "series", "two_sided_since", "two_sided_ns", "spread_ns", "touch_since", "lives", "vac", "refill", "pend",
-                 "traded", "swept", "mo10", "mo30", "mo_qty", "mids", "pending_mo", "sizes", "last_rx", "vol_by_hour", "mid_med", "mo_age")
+                 "traded", "swept", "mo10", "mo30", "mo_qty", "mids", "pending_mo", "sizes", "last_rx", "vol_by_hour", "mid_med", "mo_age", "n_lives")
 
     def __init__(self, series: str):
         self.book = FastBook()
@@ -48,7 +50,8 @@ class MStat:
         self.two_sided_ns = 0
         self.spread_ns = 0.0          # integral of spread (price units) over two-sided time
         self.touch_since = {"yes": None, "no": None}
-        self.lives: list[float] = []
+        self.lives: list[float] = []      # reservoir-sampled (<= 2000)
+        self.n_lives = 0
         self.vac = 0
         self.refill = [0, 0, 0]       # <=2ms, <=16ms, <=2s
         self.pend: deque = deque()    # (rx, side, price) vacates awaiting a refill
@@ -75,7 +78,13 @@ def main() -> None:
     ap.add_argument("--data-dir", type=Path, default=Path("../data_aws"))
     ap.add_argument("--series", nargs="*", default=["KXBTC15M", "KXETH15M", "KXBTCD"])
     ap.add_argument("--per-market", action="store_true")
+    ap.add_argument("--min-hours", type=float, default=1.0, help="per-series table: minimum two-sided hours")
     a = ap.parse_args()
+    all_series = a.series == ["ALL"]
+    try:
+        categories = json.loads((Path("../research") / "series_categories.json").read_text())
+    except Exception:  # noqa: BLE001
+        categories = {}
     ms: dict[str, MStat] = {}
     n = 0
     for rec in iter_records(a.data_dir, a.day):
@@ -85,7 +94,7 @@ def main() -> None:
             continue
         tk = raw["msg"]["market_ticker"]
         ser = tk.split("-")[0]
-        if ser not in a.series:
+        if not all_series and ser not in a.series:
             continue
         n += 1
         if n % 5_000_000 == 0:
@@ -112,7 +121,8 @@ def main() -> None:
                 while mids_rx and rx - mids_rx[0] > 40_000_000_000 and len(mids_rx) > 1:
                     mids_rx.popleft()
                     mids_v.popleft()
-            m.mid_med.append(mid_now) if n % 200 == 0 else None
+            if n % 200 == 0 and len(m.mid_med) < 5000:
+                m.mid_med.append(mid_now)
         while m.pending_mo and rx - m.pending_mo[0][0] > 30_000_000_000:
             trx, sign, pc, q, age_ms, swept = m.pending_mo.popleft()
             m10 = _mid_at(m.mids, trx + 10_000_000_000)
@@ -154,7 +164,14 @@ def main() -> None:
             bp = b.best(s)
             if bp != prev_best[s]:
                 if m.touch_since[s] is not None and prev_best[s] >= 0:
-                    m.lives.append((rx - m.touch_since[s]) / 1e6)
+                    m.n_lives += 1
+                    life = (rx - m.touch_since[s]) / 1e6
+                    if len(m.lives) < 2000:
+                        m.lives.append(life)
+                    else:
+                        j = random.randrange(m.n_lives)
+                        if j < 2000:
+                            m.lives[j] = life
                 m.touch_since[s] = rx
                 if prev_best[s] >= 0 and bp < prev_best[s]:
                     m.vac += 1
@@ -177,7 +194,7 @@ def main() -> None:
                     break
         while m.pend and rx - m.pend[0][0] > 2_000_000_000:
             m.pend.popleft()
-        if was_two and n % 50 == 0:
+        if was_two and n % 50 == 0 and len(m.sizes) < 5000:
             m.sizes.append((b.side("yes").get(b.best_yes, 0) + b.side("no").get(b.best_no, 0)) / 2 / QTY)
 
     rows = []
@@ -204,6 +221,18 @@ def main() -> None:
         print(f"| {name} | {len(group)} | {two_h:.1f} | {spread:.2f} | {st.median(sizes) if sizes else 0:.0f} | {st.median(lives) if lives else 0:.0f} | {vac / max(two_h, 1e-9):.0f} | "
               f"{rf[0] / max(vac, 1) * 100:.0f}% | {rf[1] / max(vac, 1) * 100:.0f}% | {rf[2] / max(vac, 1) * 100:.0f}% | {traded / max(two_h, 1e-9):,.0f} | {swept / max(traded, 1) * 100:.0f}% | {mo10:+.2f} | {mo30:+.2f} |")
 
+    series_list = a.series if not all_series else sorted({r[0] for r in rows}, key=lambda s_: -sum(m.traded for _, _, m in rows if _ == s_) if False else 0)
+    if all_series:
+        vol_by = defaultdict(float); hrs_by = defaultdict(float)
+        for s_, _, m in rows:
+            vol_by[s_] += m.traded; hrs_by[s_] += m.two_sided_ns / 3.6e12
+        series_list = [s_ for s_ in sorted(vol_by, key=lambda x: -vol_by[x]) if hrs_by[s_] >= a.min_hours]
+        print(f"Per series (>= {a.min_hours} two-sided hours), sorted by volume; category from series_categories.json:\n")
+        print("| series | category " + hdr[8:] + "\n" + "|" + "---|" * 15)
+        for s_ in series_list:
+            g = [r for r in rows if r[0] == s_]
+            agg(f"{s_} | {categories.get(s_, '?')}", g)
+        return
     for ser in a.series:
         g = [r for r in rows if r[0] == ser]
         if g:
