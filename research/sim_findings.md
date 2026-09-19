@@ -638,3 +638,18 @@ The decisive number is the fill markout: restricting ourselves to established to
 **Conclusion for passive quoting on Kalshi 15-minute crypto.** Under the corrected model, across two series, two days, ~40 configurations, three live sessions and every rule the data suggested (depth, level age, touch age, persistence, offset, size skew, spot triggers, latency to the physical floor, hindsight and learned presence policies), nothing is reliably positive. The reason is structural and now measured from three independent angles: benign flow goes to the front of the queue, which is held by participants who re-create levels within 0–2 ms of vacating them; what reaches a 15 ms-latency REST participant at the back of the queue is the sweep, which marks out at −0.3 to −0.9¢. The only configurations that reach zero are the ones that barely trade. Recommend stopping this line of work rather than testing further variants.
 
 What is *not* ruled out, as separate businesses rather than refinements: (a) taking in the final minute against the BRTI 60-second settlement average, where the partial average is known and the book may not price it (we have the 5 Hz index feed; never studied because we stop quoting at T−5 min); (b) the hourly KXBTCD markets with a fair-value surface and hour-scale inventory (1.4¢ spreads, 200 ms touch lifetimes, no rolling quoters, +0.26¢ maker markout in the tails). Both need a fresh decision, not a continuation.
+
+## 2026-09-19 — settlement-window taking (`settle_window.py`): in-sample positive, out-of-sample negative
+
+Model: P(YES | t s before close) = Φ((known part of the 60 s average + t·S − 60K) / (σ·√Σj²)), σ = realized per-second vol over 5 min. Rule: one trade per market per window at the first second the model disagrees with the touch by > threshold, sized min(touch depth, 50), net of the taker fee. Calibration in the last 60 s is fine (bins 0.8–1.0 → 1.00; 0.0–0.2 → 0.00–0.11).
+
+| T−180..T−120 s, thr 5% | markets | $/mkt | t | win % | Brier model / book |
+|---|---|---|---|---|---|
+| BTC 09-16 | 14 | +2.36 | 0.5 | 86% | 0.045 / 0.043 |
+| BTC 09-17 | 48 | +7.37 | 3.7 | 94% | 0.044 / 0.049 |
+| ETH 09-16 | 13 | +4.32 | 1.0 | 92% | 0.056 / 0.054 |
+| ETH 09-17 | 44 | +5.03 | 2.9 | 93% | 0.030 / 0.038 |
+| **BTC 09-18 (out of sample)** | 57 | **−2.03** | −0.7 | 77% | 0.132 / 0.121 |
+| **ETH 09-18 (out of sample)** | 44 | **−2.81** | −1.1 | 77% | 0.078 / 0.065 |
+
+The in-sample edge was the book being less confident than a random walk 2–3 min before close ("market prices more vol than realized"), i.e. buying the favourite. On 09-18 the favourite lost more often (win 77% vs 93%), the model's Brier is worse than the book's in every window, and both series lose $2–5/market at every threshold. Two days in a row of realized vol below the book's implied looked like an edge; the third day, with more moves, shows the book's extra vol premium is correct on average — it is paying for the fat tail the normal model ignores (the tail study on 09-14 already found t(3–4)-like realized tails). Not an edge; a vol-regime bet. Nothing of the settlement mechanics themselves showed up: the windows where the average is partly known (T−60 onward) are flat or too thin to trade.

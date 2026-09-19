@@ -51,8 +51,13 @@ def _age_bucket(ms: float) -> str:
     return "?"
 
 
+TICK_GRID = "tapered_deci_cent"   # set per series by run(): tapered_deci_cent (15-minute crypto) | linear_cent (KXBTCD)
+
+
 def tick_at(price: int) -> int:
-    """KXBTC15M price grid (tapered_deci_cent): 0.1c steps below 10c and above 90c, 1c between."""
+    """Price grid: tapered_deci_cent = 0.1c steps below 10c and above 90c, 1c between; linear_cent = 1c everywhere."""
+    if TICK_GRID == "linear_cent":
+        return 100
     return 10 if price < 1_000 or price >= 9_000 else 100
 QTY = 100           # 1 contract
 TAKER_FEE = 0.07    # per contract: 0.07 * p * (1-p) dollars
@@ -84,6 +89,8 @@ class Params:
     stale_feed_ms: float | None = None       # pull quotes while the latest Coinbase message arrived this late (rx - exchange ts)
     stop_before_s: float = 120.0
     signal_move: float | None = None  # $ over 1s on the spot mid; None disables
+    max_ttx_h: float | None = None          # only quote markets closing within this many hours (multi-market series)
+    global_capital: bool = False            # capital is shared across all markets of the series (multi-market)
     min_touch_age_ms: float | None = None   # only quote when our side's touch PRICE has been the best this long
     improve_only: bool = False        # quote only when the spread allows an improve (never join a touch)
     no_improve: bool = False          # never improve; join only
@@ -212,6 +219,17 @@ class Quoter:
         self.adverse_10s: float = 0.0   # dollars: mid move in the 10s after our fills, signed (negative = adverse)
 
     # ---- helpers -----------------------------------------------------------
+    def _locked_all(self, exclude_tk: str) -> float:
+        """Collateral held in every other market: net positions plus resting orders."""
+        tot = 0.0
+        for t, r in self.pnl.items():
+            if t != exclude_tk and r.pos != 0:
+                tot += r.locked()
+        for t, od in self.orders.items():
+            if t != exclude_tk:
+                tot += sum(x.price / ONE * x.remaining / QTY for x in od.values() if x.cancel_at is None)
+        return tot
+
     def _vetoed(self, tk: str, s: str, rx: int) -> bool:
         iv = self.veto.get((tk, s))
         if iv is None:
@@ -690,7 +708,7 @@ class Quoter:
                         size = max(QTY, int(self.p.size * frac) * QTY)   # increasing side shrinks toward 1 lot at the cap
                     if p.capital is not None:
                         reserved = sum(x.price / ONE * x.remaining / QTY for x in orders.values() if x.cancel_at is None)
-                        free = p.capital - r.locked() - reserved
+                        free = p.capital - r.locked() - reserved - (self._locked_all(tk) if p.global_capital else 0.0)
                         other_needs = 1 if (allow[("no" if s == "yes" else "yes")] and ("no" if s == "yes" else "yes") not in orders) else 0
                         budget = free / (1 + other_needs)
                         afford = int(budget / (want[s] / ONE)) if want[s] > 0 else 0
@@ -946,6 +964,9 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
     tickers = sorted({r.raw["msg"]["market_ticker"] for r in iter_records(data_dir, day)
                       if r.raw.get("type") == "orderbook_snapshot" and r.raw["msg"]["market_ticker"].startswith(series + "-")})
     strikes = fetch_strikes(tickers)   # needed for settlement of carried positions (and greeks / fair value)
+    global TICK_GRID
+    TICK_GRID = "linear_cent" if series.endswith("D") else "tapered_deci_cent"   # KXBTCD/KXETHD: linear_cent (checked via /markets)
+    print(f"tick grid {TICK_GRID}", file=sys.stderr)
     avg60: list[tuple[int, float]] = []   # (window_end_ms, BRTI 60s average) from the 1/s channel
     spot = SpotState()
     edge_model = EdgeModel(alpha_parquet, train_frac=train_frac) if (alpha_parquet and any(p.edge_theta is not None or p.join_theta is not None for p in configs)) else None
@@ -1307,6 +1328,20 @@ ETHSET = [
     Params("ETH depth >= 100, pessimistic queue", **_E, min_depth=100, queue="pessimistic"),
 ]
 
+# KXBTCD: hourly-settling strips of strikes, each alive ~25 h. Quote all strikes closing within max_ttx_h; capital shared.
+_HR = dict(signal_move=2.0, stop_before_s=300, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
+           place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, size=20, max_pos=20, capital=300, global_capital=True, flatten_at_stop=True)
+HOURLY = [
+    Params("hourly: all strikes, ttx <= 1 h", **_HR, max_ttx_h=1),
+    Params("hourly: all strikes, ttx <= 3 h", **_HR, max_ttx_h=3),
+    Params("hourly: all strikes, ttx <= 12 h", **_HR, max_ttx_h=12),
+    Params("hourly: ttx <= 3 h, no signal cancel", **{**_HR, "signal_move": None}, max_ttx_h=3),
+    Params("hourly: ttx <= 3 h, no gates", **{**_HR, "signal_move": None, "greeks_cap": None}, max_ttx_h=3),
+    Params("hourly: ttx <= 3 h, carry to settlement", **{**_HR, "flatten_at_stop": False}, max_ttx_h=3),
+    Params("hourly: ttx <= 3 h, size 5", **{**_HR, "size": 5, "max_pos": 5}, max_ttx_h=3),
+    Params("hourly: ttx <= 3 h, pessimistic queue", **_HR, max_ttx_h=3, queue="pessimistic"),
+]
+
 # only rest on prices that have already been the touch for a while (the benign class in the age table)
 _O = dict(signal_move=2.0, stop_before_s=300, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
           place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, size=20, max_pos=20, capital=100, flatten_at_stop=True)
@@ -1539,6 +1574,8 @@ def main() -> None:
     ap.add_argument("--eval3", action="store_true", help="depth-gate threshold sweep")
     ap.add_argument("--eval4", action="store_true", help="depth gate under the pessimistic (no advancement) queue")
     ap.add_argument("--baseline", action="store_true", help="the live/paper configuration only (for paper_vs_sim)")
+    ap.add_argument("--hourly", action="store_true", help="KXBTCD configuration set (use --series KXBTCD)")
+    ap.add_argument("--chunk", type=str, default=None, help="i/n: run the i-th of n slices of the chosen config set (memory)")
     ap.add_argument("--old", action="store_true", help="quote only established touch prices")
     ap.add_argument("--diag", action="store_true", help="fill-source diagnostics set (any series)")
     ap.add_argument("--eth", action="store_true", help="KXETH15M configuration set (use --series KXETH15M)")
@@ -1549,7 +1586,11 @@ def main() -> None:
     ap.add_argument("--sizes", action="store_true", help="depth 1000 size sweep under both queue models")
     ap.add_argument("--depth1000", action="store_true", help="the paper configuration from 2026-09-17 16:22 UTC: baseline + min depth 1000")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else OLD if a.old else DIAG if a.diag else (ETHSET if a.eth_part == 0 else ETHSET[:5] if a.eth_part == 1 else ETHSET[5:]) if a.eth else _veto_set(str(a.day), a.series) if a.veto else SIGIMP if a.sigimp else LATENCY2 if a.latency2 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else HOURLY if a.hourly else OLD if a.old else DIAG if a.diag else (ETHSET if a.eth_part == 0 else ETHSET[:5] if a.eth_part == 1 else ETHSET[5:]) if a.eth else _veto_set(str(a.day), a.series) if a.veto else SIGIMP if a.sigimp else LATENCY2 if a.latency2 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
+    if a.chunk:
+        i, n = (int(x) for x in a.chunk.split("/"))
+        per = -(-len(configs) // n)
+        configs = configs[(i - 1) * per:i * per]
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
