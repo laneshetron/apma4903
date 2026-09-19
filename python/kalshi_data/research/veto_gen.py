@@ -33,6 +33,7 @@ R = Path("../research")
 
 
 def oracle(data_dir: Path, day: date, series: str) -> None:
+    pre = "" if series == "KXBTC15M" else f"{series}_"
     books: dict[str, FastBook] = {}
     mids: dict[str, tuple[list, list]] = {}
     sweeps: list[tuple[str, str, int, int, float]] = []   # ticker, side, rx, sign, price_c
@@ -86,11 +87,11 @@ def oracle(data_dir: Path, day: date, series: str) -> None:
     for w in (50, 250, 1000):
         df = pl.DataFrame({"ticker": [x[0] for x in sweeps], "side": [x[1] for x in sweeps],
                            "start_rx": [x[2] - w * 1_000_000 for x in sweeps], "end_rx": [x[2] + 1_000_000 for x in sweeps]})
-        df.write_parquet(R / f"veto_oracle{w}_{day}.parquet")
+        df.write_parquet(R / f"{pre}veto_oracle{w}_{day}.parquet")
     sel = [x for x, a in zip(sweeps, adverse) if a]
     print(f"{len(sel):,} adverse ({len(sel)/max(1,len(sweeps))*100:.0f}%)", file=sys.stderr)
     pl.DataFrame({"ticker": [x[0] for x in sel], "side": [x[1] for x in sel],
-                  "start_rx": [x[2] - 250_000_000 for x in sel], "end_rx": [x[2] + 1_000_000 for x in sel]}).write_parquet(R / f"veto_oracleadv250_{day}.parquet")
+                  "start_rx": [x[2] - 250_000_000 for x in sel], "end_rx": [x[2] + 1_000_000 for x in sel]}).write_parquet(R / f"{pre}veto_oracleadv250_{day}.parquet")
 
 
 def model(train_day: date, test_day: date) -> None:

@@ -41,6 +41,16 @@ ONE = 10_000
 TICK = 100          # 1c (used where a fixed reference is needed)
 
 
+_AGE = ((0, 5), (5, 16), (16, 50), (50, 200), (200, 1000), (1000, float("inf")))
+
+
+def _age_bucket(ms: float) -> str:
+    for lo, hi in _AGE:
+        if lo <= ms < hi:
+            return f"{lo}-{'' if hi == float('inf') else int(hi)}ms"
+    return "?"
+
+
 def tick_at(price: int) -> int:
     """KXBTC15M price grid (tapered_deci_cent): 0.1c steps below 10c and above 90c, 1c between."""
     return 10 if price < 1_000 or price >= 9_000 else 100
@@ -74,6 +84,9 @@ class Params:
     stale_feed_ms: float | None = None       # pull quotes while the latest Coinbase message arrived this late (rx - exchange ts)
     stop_before_s: float = 120.0
     signal_move: float | None = None  # $ over 1s on the spot mid; None disables
+    min_touch_age_ms: float | None = None   # only quote when our side's touch PRICE has been the best this long
+    improve_only: bool = False        # quote only when the spread allows an improve (never join a touch)
+    no_improve: bool = False          # never improve; join only
     veto_file: str | None = None      # parquet of (ticker, side, start_rx, end_rx): presence veto on side while rx in [start, end)
     signal_improve: bool = False      # on a spot move, post-only at the old ask on the side the move favours (first at the level it vacates)
     signal_hold_ms: float = 2000.0    # how long a signal improve is exempt from the off-market cancel
@@ -193,6 +206,9 @@ class Quoter:
         self.fair_hist: dict[str, deque] = defaultdict(deque)   # ticker -> (rx_ns, fair_c) for the window variant
         self.fill_mo: deque = deque()   # (deadline_ns, ticker, sign, price_cents, qty, horizon) for markouts of our fills
         self.fill_markouts: dict[int, list[tuple[float, int]]] = {10: [], 30: []}  # horizon -> (markout cents, qty)
+        self.fill_by: dict[tuple, list[float]] = {}   # (improve|join, sweep|partial, age-of-touch bucket, age-of-level bucket) -> [mo30*qty, qty]
+        self.best_since: dict[str, dict[str, int]] = defaultdict(dict)   # ticker -> side -> rx the current best price became best
+        self._last_best: dict[str, dict[str, int]] = defaultdict(dict)
         self.adverse_10s: float = 0.0   # dollars: mid move in the 10s after our fills, signed (negative = adverse)
 
     # ---- helpers -----------------------------------------------------------
@@ -216,8 +232,13 @@ class Quoter:
             r = self.pnl[tk] = MarketPnL(tk)
         return r
 
-    def _fill(self, tk: str, o: Order, qty: int, rx: int) -> None:
+    def _fill(self, tk: str, o: Order, qty: int, rx: int, sweep: bool = False) -> None:
         r = self.m(tk)
+        born = self.level_born[tk].get((o.side, o.price))
+        bs = self.best_since[tk].get(o.side)
+        age_born = (rx - born) / 1e6 if born is not None else float("nan")
+        age_best = (rx - bs) / 1e6 if bs is not None else float("nan")
+        fkey = ("improve" if o.improved else "join", "sweep" if sweep else "partial", _age_bucket(age_best), _age_bucket(age_born))
         qty = min(qty, o.remaining)
         if qty <= 0:
             return
@@ -251,7 +272,7 @@ class Quoter:
                 # the filled quantity so spread + inventory == total
                 r.inventory_pnl += (-sign * qty / QTY) * (r.last_mid - mid) / 100
         for h in (10, 30):
-            self.fill_mo.append((rx + h * 1_000_000_000, tk, sign, px, qty, h, mid))
+            self.fill_mo.append((rx + h * 1_000_000_000, tk, sign, px, qty, h, mid, fkey))
         r.max_abs_pos = max(r.max_abs_pos, abs(r.pos))
         if o.remaining == 0:
             self.orders[tk].pop(o.side, None)
@@ -280,11 +301,15 @@ class Quoter:
 
     def resolve_markouts(self, tk: str, rx: int, book: FastBook) -> None:
         while self.fill_mo and self.fill_mo[0][0] <= rx:
-            _, t, sign, px, q, h, mid0 = self.fill_mo.popleft()
+            _, t, sign, px, q, h, mid0, fkey = self.fill_mo.popleft()
             r = self.pnl.get(t)
             mid = book.mid() if t == tk else (r.last_mid if r else None)
             if mid is not None:
                 self.fill_markouts[h].append((sign * (px - mid), q))
+                if h == 30:
+                    acc = self.fill_by.setdefault(fkey, [0.0, 0.0])
+                    acc[0] += sign * (px - mid) * q / QTY
+                    acc[1] += q / QTY
                 if h == 10 and mid0 is not None:
                     # mid move in the 10s after the fill, on the filled quantity: the
                     # adverse-selection slice of inventory P&L (negative = moved against us)
@@ -292,6 +317,11 @@ class Quoter:
 
     def on_delta(self, tk: str, rx: int, ts_ms: int, side: str, price: int, before: int, after: int, book: FastBook, close_ns: int, ctx: "Context | None" = None) -> None:
         r = self.m(tk)
+        for sd in ("yes", "no"):
+            bp = book.best(sd)
+            if self._last_best[tk].get(sd) != bp:
+                self._last_best[tk][sd] = bp
+                self.best_since[tk][sd] = rx
         mid = book.mid()
         if ts_ms != r.last_ts:
             r.pre_mid, r.last_ts = r.last_mid, ts_ms
@@ -344,7 +374,7 @@ class Quoter:
             self.vetoes["priority_fills"] += 1
             self.m(tk).sweep_fills += 1
             o.ahead = 0
-            self._fill(tk, o, qty, rx)
+            self._fill(tk, o, qty, rx, sweep=True)
             return
         if o is None or o.price != price or o.ahead is None or not self._live(o, rx):
             return
@@ -512,7 +542,7 @@ class Quoter:
             self.vetoes["taken"] += 1
         spread = (ONE - book.best_no) - book.best_yes
         tick = {"yes": tick_at(book.best_yes), "no": tick_at(book.best_no)}
-        improve = {s: (self.p.offset_ticks == 0 and spread > tick[s]) for s in ("yes", "no")}
+        improve = {s: (self.p.offset_ticks == 0 and spread > tick[s] and not self.p.no_improve) for s in ("yes", "no")}
         want = {
             "yes": book.best_yes + (tick["yes"] if improve["yes"] else 0) - self.p.offset_ticks * tick["yes"],
             "no": book.best_no + (tick["no"] if improve["no"] else 0) - self.p.offset_ticks * tick["no"],
@@ -538,6 +568,17 @@ class Quoter:
         if p.stale_feed_ms is not None and self.feed_lag_ms > p.stale_feed_ms:
             allow = {"yes": False, "no": False}
             self.vetoes["stale_feed"] += 2
+        if p.min_touch_age_ms is not None:
+            for s in ("yes", "no"):
+                bs = self.best_since[tk].get(s)
+                if allow[s] and not improve[s] and (bs is None or rx - bs < p.min_touch_age_ms * 1e6):
+                    allow[s] = False
+                    self.vetoes["young_touch"] += 1
+        if p.improve_only:
+            for s in ("yes", "no"):
+                if allow[s] and not improve[s]:
+                    allow[s] = False
+                    self.vetoes["join_disallowed"] += 1
         if self.veto:
             for s in ("yes", "no"):
                 if allow[s] and self._vetoed(tk, s, rx):
@@ -718,6 +759,7 @@ class Quoter:
             "contracts": traded,
             "pnl_c_per_contract": sum(pnl) / traded * 100 if traded else float("nan"),
             "per_market": ms,
+            "fill_by": self.fill_by,
             "fill_share_%": traded / vol * 100 if vol else float("nan"),
             "fills": sum(r.fills for r in ms),
             "avg_max_pos": st.mean(r.max_abs_pos for r in ms) / QTY,
@@ -1265,13 +1307,41 @@ ETHSET = [
     Params("ETH depth >= 100, pessimistic queue", **_E, min_depth=100, queue="pessimistic"),
 ]
 
+# only rest on prices that have already been the touch for a while (the benign class in the age table)
+_O = dict(signal_move=2.0, stop_before_s=300, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
+          place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, size=20, max_pos=20, capital=100, flatten_at_stop=True)
+OLD = [
+    Params("baseline touch joiner", **_O),
+    Params("touch age >= 50 ms", **_O, min_touch_age_ms=50, no_improve=True),
+    Params("touch age >= 200 ms", **_O, min_touch_age_ms=200, no_improve=True),
+    Params("touch age >= 500 ms", **_O, min_touch_age_ms=500, no_improve=True),
+    Params("touch age >= 1000 ms", **_O, min_touch_age_ms=1000, no_improve=True),
+    Params("touch age >= 200 ms, improves allowed", **_O, min_touch_age_ms=200),
+    Params("touch age >= 200 ms + depth gate", **_O, min_touch_age_ms=200, no_improve=True, min_depth=100),
+    Params("touch age >= 200 ms, size 5", **{**_O, "size": 5, "max_pos": 5}, min_touch_age_ms=200, no_improve=True),
+    Params("touch age >= 200 ms, pessimistic queue", **_O, min_touch_age_ms=200, no_improve=True, queue="pessimistic"),
+]
+
+# where do our fills come from, and which kinds pay? (per-fill diagnostics printed with the table)
+_D2 = dict(signal_move=2.0, stop_before_s=300, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
+           place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, size=20, max_pos=20, capital=100, flatten_at_stop=True)
+DIAG = [
+    Params("touch joiner (baseline, no join tables)", **_D2),
+    Params("join only, never improve", **_D2, no_improve=True),
+    Params("improve only, never join", **_D2, improve_only=True),
+    Params("pre-position 1 tick behind", **_D2, offset_ticks=1),
+    Params("persistence: min rest 1 s, reprice >= 2 ticks", **_D2, min_rest_ms=1000, reprice_ticks=2),
+]
+
 # hindsight / learned presence policies via external veto intervals (research/veto_*.parquet)
 _V = dict(signal_move=2.0, stop_before_s=300, join_theta=0.0, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
           place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, size=20, max_pos=20, capital=100, flatten_at_stop=True)
-def _veto_set(day: str) -> list:
-    R = "../research/"
-    return [
-        Params("baseline", **_V),
+def _veto_set(day: str, series: str = "KXBTC15M") -> list:
+    import os
+    R = "../research/" + ("" if series == "KXBTC15M" else f"{series}_")
+    base = dict(_V) if series == "KXBTC15M" else {**_V, "join_theta": None}   # no ETH edge tables
+    out = [
+        Params("baseline", **base),
         Params("oracle: dodge every sweep-through, 50 ms warning", **_V, veto_file=f"{R}veto_oracle50_{day}.parquet"),
         Params("oracle: dodge every sweep-through, 250 ms warning", **_V, veto_file=f"{R}veto_oracle250_{day}.parquet"),
         Params("oracle: dodge every sweep-through, 1 s warning", **_V, veto_file=f"{R}veto_oracle1000_{day}.parquet"),
@@ -1280,6 +1350,11 @@ def _veto_set(day: str) -> list:
         Params("learned: vacate model p>0.3 @250 ms", **_V, veto_file=f"{R}veto_model30_{day}.parquet"),
         Params("learned: vacate model p>0.7 @250 ms", **_V, veto_file=f"{R}veto_model70_{day}.parquet"),
     ]
+    out = [o for o in out if o.veto_file is None or os.path.exists(o.veto_file)]
+    for o in out:
+        if series != "KXBTC15M":
+            o.join_theta = None
+    return out
 
 # spot-triggered improve: post-only at the vacating touch on the spot trigger (first at the new level)
 _S = dict(stop_before_s=300, join_theta=0.0, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
@@ -1464,14 +1539,17 @@ def main() -> None:
     ap.add_argument("--eval3", action="store_true", help="depth-gate threshold sweep")
     ap.add_argument("--eval4", action="store_true", help="depth gate under the pessimistic (no advancement) queue")
     ap.add_argument("--baseline", action="store_true", help="the live/paper configuration only (for paper_vs_sim)")
+    ap.add_argument("--old", action="store_true", help="quote only established touch prices")
+    ap.add_argument("--diag", action="store_true", help="fill-source diagnostics set (any series)")
     ap.add_argument("--eth", action="store_true", help="KXETH15M configuration set (use --series KXETH15M)")
+    ap.add_argument("--eth-part", type=int, default=0, help="1 or 2: run half of the ETH set (memory)")
     ap.add_argument("--veto", action="store_true", help="hindsight and learned presence policies (needs research/veto_*.parquet for the day)")
     ap.add_argument("--sigimp", action="store_true", help="spot-triggered improve study")
     ap.add_argument("--latency2", action="store_true", help="latency sweep under the corrected model")
     ap.add_argument("--sizes", action="store_true", help="depth 1000 size sweep under both queue models")
     ap.add_argument("--depth1000", action="store_true", help="the paper configuration from 2026-09-17 16:22 UTC: baseline + min depth 1000")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else ETHSET if a.eth else _veto_set(str(a.day)) if a.veto else SIGIMP if a.sigimp else LATENCY2 if a.latency2 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else OLD if a.old else DIAG if a.diag else (ETHSET if a.eth_part == 0 else ETHSET[:5] if a.eth_part == 1 else ETHSET[5:]) if a.eth else _veto_set(str(a.day), a.series) if a.veto else SIGIMP if a.sigimp else LATENCY2 if a.latency2 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
@@ -1495,6 +1573,21 @@ def main() -> None:
         L.append(f"| {r['name']} | " + " | ".join(cells) + " |")
         if r.get("vetoes"):
             L.append(f"|  ↳ vetoes: {r['vetoes']} |")
+    for r in res:
+        fb = r.get("fill_by")
+        if not fb:
+            continue
+        tot = sum(v[1] for v in fb.values()) or 1
+        L.append(f"\n{r['name']}: our fills by kind / sweep / age of the touch price / age of the level (mo30 ¢, share of contracts)\n")
+        L.append("| kind | class | touch age | level age | contracts | share | mo30 ¢ |\n|---|---|---|---|---|---|---|")
+        for k, (v, q) in sorted(fb.items(), key=lambda kv: -kv[1][1])[:24]:
+            L.append(f"| {k[0]} | {k[1]} | {k[2]} | {k[3]} | {q:,.0f} | {q / tot * 100:.0f}% | {v / q:+.2f} |")
+        agg = {}
+        for k, (v, q) in fb.items():
+            slot = agg.setdefault((k[0], k[1]), [0.0, 0.0]); slot[0] += v; slot[1] += q
+        L.append("| **by kind/class** | | | | | | |")
+        for k, (v, q) in sorted(agg.items(), key=lambda kv: -kv[1][1]):
+            L.append(f"| {k[0]} | {k[1]} | — | — | {q:,.0f} | {q / tot * 100:.0f}% | {v / q:+.2f} |")
     text = "\n".join(L)
     print(text)
     if a.out:

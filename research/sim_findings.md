@@ -582,3 +582,37 @@ Presence-only action ("be on this side or not"), the sim's fill model as the env
 | learned p > 0.7 (0.9%) | −1.93 (−4.3) | 240,447 | −0.06 | 5,622 |
 
 The bound is real: a clairvoyant presence policy earns +$2.6–5.4/market at size 20 on the same book where everything else loses — the whole loss is the sweeps, and dodging them with as little as 50 ms warning flips the sign. The learned policy recovers about a third of the gap at p > 0.3 (−2.24 → −0.57; sweep fills 6,408 → 3,556; markout −0.05 → +0.01) and is monotone in coverage, but does not cross zero: at AUC 0.835 the false positives (pulling from levels that survive, losing the +0.58¢ partials) cost about what the dodged sweeps save. To be worth deploying on BTC the classifier would need roughly AUC 0.9+ at the same horizon, or a cheaper action than pulling. On ETH the same machinery starts from a positive baseline (below).
+
+## 2026-09-18 — KXETH15M under the corrected model, and where our fills actually come from
+
+**ETH is worse than BTC for us, despite a better market.** 113 markets (09-16/17), corrected model, size 20:
+
+| config | $/mkt (t) | win | contracts/mkt | fill mo30 |
+|---|---|---|---|---|
+| touch joiner (greeks cap, signal cancel) | −5.15 (−15.3) | 7% | 1,856 | −0.27¢ |
+| no gates | −7.90 (−15.6) | 1% | 2,422 | −0.32¢ |
+| depth ≥ 50 / 100 / 200 | ≈ −2.2 (−6) | ~30% | 650–950 | −0.10…−0.22¢ |
+| size 5 / size 50 | −1.28 / −10.58 | 8% / 7% | 605 / 3,337 | −0.21 / −0.28¢ |
+| pessimistic queue | −4.67 (−14.1) | 7% | 1,599 | −0.30¢ |
+
+Settlement uses `ETHUSD_RTI`; the price grid is the same tapered grid as BTC (checked against `price_ranges`).
+
+**Maker markout by age of the touch price when the trade arrived** (`survey.py`, 09-17, all touch trades — not just ours):
+
+| age of touch | class | ETH share / mo30 | BTC share / mo30 |
+|---|---|---|---|
+| 0–5 ms | sweep | 41% / +0.27¢ | 20% / −0.28¢ |
+| 0–5 ms | partial | 16% / +0.86¢ | 9% / +0.01¢ |
+| 5–16 ms | partial | 2% / −0.80¢ | 2% / −0.92¢ |
+| 16–50 ms | partial | 2% / +0.52¢ | 3% / −0.65¢ |
+| 50–200 ms | partial | 4% / +0.19¢ | 7% / −0.06¢ |
+| 200–1000 ms | partial | 9% / +0.46¢ | 20% / +0.13¢ |
+| ≥ 1 s | partial | 20% / +0.20¢ | 37% / +0.22¢ |
+
+The toxic window is **5–50 ms after a price becomes the touch**, on both books — exactly where a WS-driven quoter lives (we see a level at +6 ms, land at +15). Trades on prices established ≥ 200 ms are benign everywhere and are 29% of ETH volume, 57% of BTC volume; sweeps rarely reach them.
+
+**Our own fills (sim, ETH baseline, by kind / class):** join-partial 31% at −0.01¢, improve-sweep 30% at −0.22¢, join-sweep 22% at −0.87¢, improve-partial 17% at −0.04¢ — 52% of our volume is sweeps vs 44% market-wide, and our sweep fills are much worse than the market's because price priority fills us at levels a sweep passes *through*, while the market-wide figure counts the maker at the printing level. The fills that pay are rare for us: join-partial on a 200 ms–1 s touch **+0.77¢ (3% of contracts)**, on a 50–200 ms touch **+1.02¢ (1%)**. Improve-only is the extreme: 97% of its fills are sweeps (−0.27¢) — a lone improver is only hit by someone sweeping through it.
+
+Diagnostic variants (09-17): ETH join-only −3.42, improve-only −1.57, pre-position 1 tick −0.45, persistence −6.65; BTC join-only −2.12, improve-only −0.27, pre-position −2.45, persistence −3.64. Nothing positive, but the ranking says volume is the enemy: every variant that trades less loses less.
+
+Open question being tested (`sim --old`): quote **only** prices that have been the touch ≥ 50/200/500/1000 ms and hold while they remain the touch. Every fill would then be in the +0.2…+1.0¢ class, but at an old touch we join the back of a long queue — whether any volume survives is the test.

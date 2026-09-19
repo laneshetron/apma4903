@@ -39,7 +39,7 @@ QTY = 100
 
 class MStat:
     __slots__ = ("book", "series", "two_sided_since", "two_sided_ns", "spread_ns", "touch_since", "lives", "vac", "refill", "pend",
-                 "traded", "swept", "mo10", "mo30", "mo_qty", "mids", "pending_mo", "sizes", "last_rx", "vol_by_hour", "mid_med")
+                 "traded", "swept", "mo10", "mo30", "mo_qty", "mids", "pending_mo", "sizes", "last_rx", "vol_by_hour", "mid_med", "mo_age")
 
     def __init__(self, series: str):
         self.book = FastBook()
@@ -59,6 +59,7 @@ class MStat:
         self.pending_mo: deque = deque()   # (rx, sign, price_c, qty)
         self.sizes: list[float] = []
         self.mid_med: list[float] = []
+        self.mo_age: dict = defaultdict(lambda: [0.0, 0.0])   # (age bucket, class) -> [mo30*qty, qty]
         self.last_rx = 0
 
     def mid(self) -> float | None:
@@ -113,13 +114,16 @@ def main() -> None:
                     mids_v.popleft()
             m.mid_med.append(mid_now) if n % 200 == 0 else None
         while m.pending_mo and rx - m.pending_mo[0][0] > 30_000_000_000:
-            trx, sign, pc, q = m.pending_mo.popleft()
+            trx, sign, pc, q, age_ms, swept = m.pending_mo.popleft()
             m10 = _mid_at(m.mids, trx + 10_000_000_000)
             m30 = _mid_at(m.mids, trx + 30_000_000_000)
             if m10 is not None and m30 is not None:
                 m.mo10 += sign * (m10 - pc) * q
                 m.mo30 += sign * (m30 - pc) * q
                 m.mo_qty += q
+                k = (_age_bucket(age_ms), "sweep" if swept else "partial")
+                m.mo_age[k][0] += sign * (m30 - pc) * q
+                m.mo_age[k][1] += q
         if t == "orderbook_snapshot":
             b.snapshot(raw["msg"])
         elif t == "orderbook_delta":
@@ -137,11 +141,13 @@ def main() -> None:
             m.traded += q
             # maker at the hit side transacted at yes_price (yes bid) or sold YES at yes_price (no bid): sign for maker
             sign = 1 if hit == "yes" else -1
-            m.pending_mo.append((rx, sign, yes_price / 100, q))
             # sweep: the trade price is worse for the taker than the touch, or the level is gone right after
             lvl_price = yes_price if hit == "yes" else ONE - yes_price
-            if b.side(hit).get(lvl_price, 0) == 0 or (hit == "yes" and yes_price < prev_best["yes"]) or (hit == "no" and ONE - yes_price < prev_best["no"]):
+            swept = b.side(hit).get(lvl_price, 0) == 0 or (hit == "yes" and yes_price < prev_best["yes"]) or (hit == "no" and ONE - yes_price < prev_best["no"])
+            if swept:
                 m.swept += q
+            age_ms = (rx - m.touch_since[hit]) / 1e6 if m.touch_since[hit] is not None else float("nan")
+            m.pending_mo.append((rx, sign, yes_price / 100, q, age_ms, swept))
             continue
         # touch changes
         for s in ("yes", "no"):
@@ -216,12 +222,39 @@ def main() -> None:
             buckets["tails (<10c or >90c)" if mid < 10 or mid > 90 else "mid (10-90c)"].append(r)
         for k, gg in buckets.items():
             agg(f"{ser} {k}", gg)
+    for ser in a.series:
+        g = [r for r in rows if r[0] == ser]
+        if not g:
+            continue
+        print(f"\n{ser}: maker markout at 30 s by age of the hit touch level when the trade arrived (a REST joiner is on levels >= ~15 ms old)\n")
+        print("| age of level | class | contracts | share | mo30 ¢ |\n|---|---|---|---|---|")
+        tot = defaultdict(lambda: [0.0, 0.0])
+        for _, _, m in g:
+            for k, (v, q) in m.mo_age.items():
+                tot[k][0] += v; tot[k][1] += q
+        allq = sum(q for _, q in tot.values()) or 1
+        for lo, hi in AGE_BUCKETS:
+            for cls in ("partial", "sweep"):
+                k = (f"{lo}-{hi if hi != float('inf') else ''}ms", cls)
+                v, q = tot.get(k, (0.0, 0.0))
+                if q:
+                    print(f"| {k[0]} | {cls} | {q:,.0f} | {q / allq * 100:.0f}% | {v / q:+.2f} |")
     if a.per_market:
         for ser in a.series:
             print(f"\n{ser}, top 20 markets by volume:\n")
             print(hdr + "\n" + "|" + "---|" * 14)
             for s_, tk, m in sorted([r for r in rows if r[0] == ser], key=lambda r: -r[2].traded)[:20]:
                 agg(tk, [(s_, tk, m)])
+
+
+AGE_BUCKETS = ((0, 5), (5, 16), (16, 50), (50, 200), (200, 1000), (1000, float("inf")))
+
+
+def _age_bucket(ms: float) -> str:
+    for lo, hi in AGE_BUCKETS:
+        if lo <= ms < hi:
+            return f"{lo}-{hi if hi != float('inf') else ''}ms"
+    return "?"
 
 
 def _mid_at(series, t_ns):
