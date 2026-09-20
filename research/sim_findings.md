@@ -681,3 +681,19 @@ Setup: linear-cent grid, no spot signal / greeks / strike, close = min(close_tim
 | KXNCAAFTOTAL / KXNCAAFSPREAD | 535 / 25 (partial) | −0.08 / −0.35 | | 13 / 11 per market | | hundreds of thin markets; run for spreads killed at 72/90 (many-market slowdown) |
 
 Reading: in the slow markets the constraint flips from adverse selection to access. Fills are profitable almost everywhere (+0.4 to +2.3¢) but rare, because the touch is deep and turns over slowly and a 1¢ spread leaves no room to improve. The series that pays is the one with a wide spread: improving by 1¢ inside 4.5¢ puts us first in the queue with ~2¢ of half-spread still captured, and the ~1¢ adverse selection on those fills is affordable. Second day needed (09-20: Sunday football + NFL in-play).
+
+### 09-20 (Sunday football, in-play) — the wide-spread hypothesis fails out of sample
+
+Same setup; books warm-started from 09-19 where a market's subscription snapshot predated the day (the sim skipped those markets on the first pass — fixed with `--warm-days`; the recorder now re-snapshots every market at 00:00 UTC). Two marking gaps fixed: an empty snapshot no longer wipes the last mid; a one-sided book at the stop marks at the last two-sided mid.
+
+| series (09-20) | markets | $/market (t) | contracts | fill mo30 |
+|---|---|---|---|---|
+| KXEPLGAME (in-play winners) | 12 | **−8.08 (−4.4)** | 51,214 | −0.17¢ |
+| KXEPLTOTAL | 23 | **−4.21 (−3.9)** | 31,027 | −0.30¢ |
+| KXLALIGATOTAL | 16 | −1.02 (−2.5) | 7,083 | −0.45¢ |
+| KXBUNDESLIGATOTAL | 6 | −0.57 | 688 | −0.69¢ |
+| KXEFLCHAMPIONSHIPTOTAL (Sunday) | 2 | −6.41 | 253 | −0.82¢ |
+| KXEREDIVISIETOTAL | 4 | +2.18 (0.5, SD 9.7) | 969 | −0.49¢ |
+| Serie A / Ligue 1 totals | 2 / 4 | dust | | |
+
+Every configuration negative on every series with a real sample (size 5, depth gate, join-only, pessimistic, carry — all). On the biggest books (EPL winners and totals) the loss is $4–8 per market, and the fill mix says why: 27% of EPL-totals volume is "improve on a fresh price, swept" at −0.96¢ — we post inside the spread and are run over by the goal. The 09-19 EFL result (+$2.58/mkt on 12 markets) was variance. Conclusion for in-play sports as a passive quoter: the wide spread is not protection; the informed flow is anyone with a faster score feed, on a timescale of seconds, and a quoter with no score-aware fair value is its counterparty. The only version of this that could work is a maker whose fair value reprices on the goal before the flow arrives (a Poisson goal model on live score/clock), which is a different product needing a score feed — untested.

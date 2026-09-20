@@ -319,7 +319,9 @@ class Quoter:
     def on_snapshot(self, tk: str, book: FastBook) -> None:
         self.orders[tk].clear()   # book was rebuilt; treat our orders as cancelled
         r = self.m(tk)
-        r.last_mid = book.mid()   # no inventory P&L is booked across a stale gap
+        m = book.mid()
+        if m is not None:         # an empty snapshot (market closed / emptied) keeps the last known mid
+            r.last_mid = m        # no inventory P&L is booked across a stale gap
         r.pre_mid = r.last_mid
 
     def resolve_markouts(self, tk: str, rx: int, book: FastBook) -> None:
@@ -530,6 +532,8 @@ class Quoter:
                 self.stopped.add(tk)
                 r.stop_rx = rx
                 mid = book.mid()
+                if mid is None:
+                    mid = r.last_mid   # one-sided book at the stop (outcome known): mark at the last two-sided mid
                 if mid is not None:
                     p = mid / 100
                     r.flatten_cost = abs(r.pos) / QTY * (0.005 + TAKER_FEE * p * (1 - p))
@@ -991,7 +995,8 @@ class Context:
 # ------------------------------------------------------------------- driver ---
 
 def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params],
-        alpha_parquet: Path | None = None, train_frac: float = 0.6, checkpoint=None, no_spot: bool = False) -> tuple[list[dict], int]:
+        alpha_parquet: Path | None = None, train_frac: float = 0.6, checkpoint=None, no_spot: bool = False,
+        warm_days: int = 0) -> tuple[list[dict], int]:
     """checkpoint(results) is called every 10M records with the summaries so far (markets completed to that point)."""
     quoters = [Quoter(p) for p in configs]
     books: dict[str, FastBook] = {}
@@ -1039,6 +1044,38 @@ def run(data_dir: Path, day: date, series: str, venue: str, configs: list[Params
                 yield ("cbsz", rec.rx_ns, float(raw["best_bid_size"]), float(raw["best_ask_size"]))
 
     n = 0
+    # warm start: rebuild the books from earlier days' snapshots and deltas (no quoting), for markets
+    # whose subscription snapshot predates the day under study
+    from datetime import timedelta as _td
+    for back in range(warm_days, 0, -1):
+        wd = day - _td(days=back)
+        nwarm = 0
+        for rec in iter_records(data_dir, wd):
+            raw = rec.raw
+            t = raw.get("type")
+            if t not in ("orderbook_snapshot", "orderbook_delta"):
+                continue
+            msg = raw["msg"]
+            tk = msg["market_ticker"]
+            if not tk.startswith(series + "-"):
+                continue
+            b = books.get(tk)
+            if b is None:
+                ct = close_time(tk)
+                if ct is None:
+                    continue
+                b = books[tk] = FastBook()
+                closes[tk] = int(ct * 1e9)
+                closing[closes[tk] // 1_000_000].append(tk)
+            if t == "orderbook_snapshot":
+                b.snapshot(msg)
+                nwarm += 1
+            elif not b.stale:
+                try:
+                    b.delta(msg["side"], parse_price(msg["price_dollars"]), parse_qty(msg["delta_fp"]))
+                except ValueError:
+                    b.stale = True
+        print(f"warm start from {wd}: {nwarm} snapshots, {sum(1 for b in books.values() if not b.stale)} live books", file=sys.stderr)
     stream = iter_records(data_dir, day) if no_spot else heapq.merge(iter_records(data_dir, day), spot_events(), cb_sizes(),
                          key=lambda e: e[1] if isinstance(e, tuple) else e.rx_ns)
     for rec in stream:
@@ -1644,6 +1681,7 @@ def main() -> None:
     ap.add_argument("--eval4", action="store_true", help="depth gate under the pessimistic (no advancement) queue")
     ap.add_argument("--baseline", action="store_true", help="the live/paper configuration only (for paper_vs_sim)")
     ap.add_argument("--noncrypto", action="store_true", help="non-crypto configuration set (use --series <series>, --no-spot)")
+    ap.add_argument("--warm-days", type=int, default=0, help="rebuild books from this many earlier days first (broad tape)")
     ap.add_argument("--no-spot", action="store_true", help="do not merge the spot feeds (series with no spot reference)")
     ap.add_argument("--hourly", action="store_true", help="KXBTCD configuration set (use --series KXBTCD)")
     ap.add_argument("--chunk", type=str, default=None, help="i/n: run the i-th of n slices of the chosen config set (memory)")
@@ -1674,7 +1712,7 @@ def main() -> None:
         Path(str(a.out) + ".partial.md").write_text("\n".join(rows))
 
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
-                         train_frac=1.0 if a.tables_from else 0.6, checkpoint=checkpoint, no_spot=a.no_spot)
+                         train_frac=1.0 if a.tables_from else 0.6, checkpoint=checkpoint, no_spot=a.no_spot, warm_days=a.warm_days)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
     L = [f"# Quoter simulation, {a.series}, {a.day}", "",
          "Touch quoter, 100 contracts/side unless noted, max position 500, quoting stops 2 min before expiry, inventory marked at mid. "
