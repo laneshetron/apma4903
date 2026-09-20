@@ -54,3 +54,6 @@ combo series and the crypto series already covered by `kalshi-collector` are exc
 it up into `data_aws/broad`), status on `:8084`, log `logs/collector-broad.log`, Nice=5 so the crypto
 collector keeps priority. Screen the result with
 `uv run python -m kalshi_data.research.survey <day> --data-dir ../data_aws/broad --series <...>`.
+
+Disk: the exchange-wide recorder writes ~13-14 GB/day. After `deploy/sync.sh` has pulled a complete day
+(file counts match), delete it on the host: `sudo rm -rf /opt/kalshi/data/broad/raw/<day>`.
