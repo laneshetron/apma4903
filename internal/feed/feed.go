@@ -462,6 +462,46 @@ func (f *Feed) resyncLocked(ctx context.Context, conn *kalshi.Conn, sub *subStat
 	}()
 }
 
+// Resnapshot requests a fresh orderbook snapshot for every subscribed market
+// (in chunks), so that a day's tape is self-contained: replaying a day from
+// midnight then needs no earlier tape to rebuild the books. Books are not
+// marked stale meanwhile; the snapshot simply replaces them when it arrives.
+func (f *Feed) Resnapshot(ctx context.Context) error {
+	f.mu.Lock()
+	conn := f.conn
+	var sid int
+	found := false
+	for _, s := range f.subs {
+		if s.channel == "orderbook_delta" {
+			sid, found = s.sid, true
+			break
+		}
+	}
+	tickers := f.snapshotDesired()
+	f.mu.Unlock()
+	if conn == nil || !found || len(tickers) == 0 {
+		return nil
+	}
+	f.record(recorder.EventResync, map[string]any{"sid": sid, "reason": "daily_resnapshot", "count": len(tickers)})
+	const chunk = 500
+	for i := 0; i < len(tickers); i += chunk {
+		j := min(i+chunk, len(tickers))
+		cctx, cancel := context.WithTimeout(ctx, f.cfg.CommandTimeout)
+		err := conn.RequestSnapshot(cctx, sid, tickers[i:j])
+		cancel()
+		if err != nil {
+			return fmt.Errorf("daily resnapshot: %w", err)
+		}
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	f.log.Info("daily resnapshot requested", "markets", len(tickers))
+	return nil
+}
+
 // SetMarkets replaces the desired market set, issuing add/delete updates on
 // the live connection. Markets that are no longer desired are dropped.
 func (f *Feed) SetMarkets(ctx context.Context, tickers []string) error {

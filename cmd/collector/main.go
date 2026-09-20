@@ -98,6 +98,21 @@ func run(cfgPath string) error {
 			}
 		})
 	}
+	// re-snapshot every market just after 00:00 UTC so each day's raw tape stands alone
+	go func() {
+		for {
+			now := time.Now().UTC()
+			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 5, 0, time.UTC)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(next.Sub(now)):
+				if err := f.Resnapshot(ctx); err != nil {
+					log.Warn("daily resnapshot", "err", err)
+				}
+			}
+		}
+	}()
 	if cfg.RESTCheckInterval > 0 {
 		go every(ctx, cfg.RESTCheckInterval, func() {
 			bad, err := f.CrossCheck(ctx, rest)
