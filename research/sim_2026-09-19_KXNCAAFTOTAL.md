@@ -4,209 +4,215 @@ Touch quoter, 100 contracts/side unless noted, max position 500, quoting stops 2
 
 | config | markets | pnl_$ | spread_$ | inventory_$ | adverse_10s_$ | test_markets | test_pnl_$ | test_spread_$ | test_inventory_$ | realized_$ | unrealized_$ | pnl_per_market_$ | pnl_sd_$ | t_stat | worst_$ | contracts | pnl_c_per_contract | fill_markout_30s_c | improved_fill_% | fill_share_% | fills | avg_max_pos | end_pos_abs | flatten_cost_$ |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| touch joiner | 535 | -42.56 | 86.05 | -109.09 | -131.33 | 535 | -42.56 | 86.05 | -109.09 | 34.25 | -76.80 | -0.08 | 0.51 | -3.63 | -4.05 | 6,829 | -0.62 | -0.27 | 63.89 | 0.05 | 4,987 | 3.32 | 0.85 | 6.14 |
-|  ↳ vetoes: {'capital': 15175639, 'priority_fills': 4026} |
-| touch joiner, size 5 | 547 | -60.49 | 107.46 | -154.35 | -154.77 | 547 | -60.49 | 107.46 | -154.35 | 17.87 | -78.36 | -0.11 | 0.41 | -6.26 | -2.23 | 8,898 | -0.68 | -0.19 | 65.29 | 0.07 | 6,059 | 2.85 | 0.80 | 4.95 |
-|  ↳ vetoes: {'priority_fills': 4701, 'capital': 11007175} |
-| touch joiner, depth >= 50 | 537 | -32.39 | 81.97 | -98.89 | -116.71 | 537 | -32.39 | 81.97 | -98.89 | 33.54 | -65.93 | -0.06 | 0.49 | -2.85 | -3.25 | 5,670 | -0.57 | -0.21 | 79.96 | 0.04 | 3,902 | 3.33 | 0.97 | 5.05 |
-|  ↳ vetoes: {'thin': 3320054, 'capital': 14005694, 'priority_fills': 3614} |
-| join only, never improve | 508 | -20.40 | 68.93 | -75.64 | -93.38 | 508 | -20.40 | 68.93 | -75.64 | 43.34 | -63.74 | -0.04 | 0.55 | -1.64 | -3.65 | 5,040 | -0.40 | 0.05 | 0.00 | 0.04 | 3,860 | 2.96 | 0.94 | 4.82 |
-|  ↳ vetoes: {'capital': 14284621, 'priority_fills': 1564} |
-| touch joiner, pessimistic queue | 525 | -31.24 | 67.51 | -81.14 | -100.70 | 525 | -31.24 | 67.51 | -81.14 | 40.60 | -71.84 | -0.06 | 0.52 | -2.61 | -4.24 | 4,904 | -0.64 | -0.28 | 75.30 | 0.04 | 3,854 | 2.80 | 0.90 | 4.37 |
-|  ↳ vetoes: {'capital': 17170358, 'priority_fills': 3753} |
-| touch joiner, carry (no flatten) | 528 | -9.52 | 73.56 | -82.86 | -98.94 | 528 | -9.52 | 73.56 | -82.86 | 45.45 | -54.97 | -0.02 | 0.43 | -0.95 | -3.10 | 5,788 | -0.16 | -0.14 | 63.09 | 0.05 | 4,432 | 2.89 | 1.47 | 5.54 |
-|  ↳ vetoes: {'capital': 16534188, 'priority_fills': 3446} |
+| touch joiner | 714 | -37.35 | 161.85 | -174.31 | -221.71 | 714 | -37.35 | 161.85 | -174.31 | 57.81 | -95.16 | -0.05 | 0.57 | -2.43 | -4.93 | 13,850 | -0.27 | -0.08 | 65.85 | 0.07 | 9,162 | 3.27 | 0.58 | 9.06 |
+|  ↳ vetoes: {'priority_fills': 7448, 'capital': 23890130} |
+| touch joiner, size 5 | 720 | -102.84 | 222.94 | -305.55 | -327.11 | 720 | -102.84 | 222.94 | -305.55 | -6.03 | -96.81 | -0.14 | 0.51 | -7.48 | -5.66 | 20,177 | -0.51 | -0.20 | 69.85 | 0.10 | 11,382 | 2.71 | 0.60 | 7.40 |
+|  ↳ vetoes: {'priority_fills': 9400, 'capital': 18265785} |
+| touch joiner, depth >= 50 | 716 | -41.05 | 152.37 | -166.47 | -214.28 | 716 | -41.05 | 152.37 | -166.47 | 76.77 | -117.82 | -0.06 | 0.58 | -2.63 | -3.86 | 11,622 | -0.35 | -0.11 | 81.96 | 0.06 | 7,365 | 2.99 | 0.61 | 9.09 |
+|  ↳ vetoes: {'thin': 5246850, 'priority_fills': 7146, 'capital': 21839714} |
+| join only, never improve | 689 | -15.96 | 146.03 | -139.63 | -187.44 | 689 | -15.96 | 146.03 | -139.63 | 69.81 | -85.77 | -0.02 | 0.64 | -0.95 | -3.69 | 9,798 | -0.16 | 0.13 | 0.00 | 0.05 | 7,205 | 2.60 | 0.54 | 7.19 |
+|  ↳ vetoes: {'priority_fills': 2866, 'capital': 22270812} |
+| touch joiner, pessimistic queue | 708 | -60.86 | 154.53 | -192.63 | -218.08 | 708 | -60.86 | 154.53 | -192.63 | 39.99 | -100.85 | -0.09 | 0.58 | -3.92 | -3.96 | 12,664 | -0.48 | -0.13 | 76.29 | 0.06 | 8,173 | 2.99 | 0.62 | 8.07 |
+|  ↳ vetoes: {'priority_fills': 8129, 'capital': 24348924} |
+| touch joiner, carry (no flatten) | 703 | -24.23 | 134.13 | -158.31 | -199.20 | 703 | -24.23 | 134.13 | -158.31 | 44.32 | -68.54 | -0.03 | 0.51 | -1.79 | -4.87 | 11,814 | -0.21 | -0.16 | 65.18 | 0.06 | 8,344 | 2.53 | 1.08 | 7.21 |
+|  ↳ vetoes: {'priority_fills': 6717, 'capital': 27483944} |
 
 touch joiner: our fills by kind / sweep / age of the touch price / age of the level (mo30 ¢, share of contracts)
 
 | kind | class | touch age | level age | contracts | share | mo30 ¢ |
 |---|---|---|---|---|---|---|
-| improve | sweep | 1000-ms | ? | 1,845 | 22% | +0.05 |
-| improve | sweep | 0-5ms | ? | 1,602 | 19% | -0.73 |
-| join | partial | 1000-ms | 1000-ms | 957 | 12% | +0.16 |
-| join | partial | 0-5ms | ? | 837 | 10% | -0.68 |
-| join | partial | 1000-ms | ? | 695 | 8% | +0.45 |
-| improve | partial | 1000-ms | 1000-ms | 616 | 7% | +0.25 |
-| join | sweep | 0-5ms | ? | 595 | 7% | -1.38 |
-| improve | partial | 0-5ms | ? | 336 | 4% | -0.55 |
-| join | sweep | 1000-ms | ? | 162 | 2% | -1.75 |
-| improve | sweep | 200-1000ms | ? | 151 | 2% | +0.14 |
-| improve | sweep | 50-200ms | ? | 145 | 2% | +1.09 |
-| improve | partial | 50-200ms | 50-200ms | 63 | 1% | +0.52 |
-| improve | sweep | 16-50ms | ? | 52 | 1% | -0.86 |
-| join | sweep | 1000-ms | 1000-ms | 50 | 1% | -1.38 |
-| improve | partial | 200-1000ms | 200-1000ms | 44 | 1% | -0.09 |
-| join | sweep | 200-1000ms | ? | 19 | 0% | +1.89 |
-| improve | partial | 16-50ms | 16-50ms | 18 | 0% | +1.31 |
-| join | sweep | 50-200ms | ? | 14 | 0% | -0.86 |
-| join | partial | 200-1000ms | 200-1000ms | 14 | 0% | -1.14 |
-| join | sweep | 16-50ms | ? | 13 | 0% | -0.46 |
-| join | sweep | 5-16ms | ? | 10 | 0% | -1.81 |
-| join | partial | 50-200ms | 50-200ms | 7 | 0% | -0.57 |
-| improve | partial | 5-16ms | 5-16ms | 7 | 0% | +0.71 |
-| improve | sweep | 5-16ms | ? | 5 | 0% | -0.31 |
+| improve | sweep | 0-5ms | ? | 4,277 | 25% | -0.23 |
+| improve | sweep | 1000-ms | ? | 4,264 | 25% | +0.37 |
+| join | partial | 1000-ms | 1000-ms | 1,676 | 10% | +0.25 |
+| join | partial | 0-5ms | ? | 1,605 | 9% | -0.81 |
+| improve | partial | 1000-ms | 1000-ms | 1,100 | 6% | +0.45 |
+| join | sweep | 0-5ms | ? | 1,001 | 6% | -1.31 |
+| join | partial | 1000-ms | ? | 780 | 5% | +0.38 |
+| improve | partial | 0-5ms | ? | 607 | 4% | -0.86 |
+| improve | sweep | 200-1000ms | ? | 521 | 3% | +0.46 |
+| improve | sweep | 50-200ms | ? | 301 | 2% | +0.73 |
+| join | sweep | 1000-ms | ? | 271 | 2% | -1.74 |
+| improve | sweep | 16-50ms | ? | 98 | 1% | +1.84 |
+| improve | partial | 200-1000ms | 200-1000ms | 95 | 1% | +0.02 |
+| improve | partial | 50-200ms | 50-200ms | 84 | 0% | +0.65 |
+| join | sweep | 1000-ms | 1000-ms | 71 | 0% | -1.16 |
+| join | sweep | 200-1000ms | ? | 40 | 0% | +0.47 |
+| improve | partial | 16-50ms | 16-50ms | 39 | 0% | -0.44 |
+| join | partial | 200-1000ms | 200-1000ms | 29 | 0% | -0.22 |
+| join | sweep | 16-50ms | ? | 24 | 0% | -0.96 |
+| improve | partial | 5-16ms | 5-16ms | 24 | 0% | -0.38 |
+| join | sweep | 5-16ms | ? | 18 | 0% | -1.51 |
+| join | sweep | 200-1000ms | 1000-ms | 17 | 0% | -6.00 |
+| join | sweep | 50-200ms | ? | 13 | 0% | -0.65 |
+| join | partial | 50-200ms | 50-200ms | 9 | 0% | +1.94 |
 | **by kind/class** | | | | | | |
-| improve | sweep | — | — | 3,801 | 46% | -0.25 |
-| join | partial | — | — | 2,512 | 30% | -0.06 |
-| improve | partial | — | — | 1,085 | 13% | +0.03 |
-| join | sweep | — | — | 869 | 11% | -1.37 |
+| improve | sweep | — | — | 9,473 | 56% | +0.13 |
+| join | partial | — | — | 4,104 | 24% | -0.14 |
+| improve | partial | — | — | 1,952 | 11% | +0.01 |
+| join | sweep | — | — | 1,459 | 9% | -1.38 |
 
 touch joiner, size 5: our fills by kind / sweep / age of the touch price / age of the level (mo30 ¢, share of contracts)
 
 | kind | class | touch age | level age | contracts | share | mo30 ¢ |
 |---|---|---|---|---|---|---|
-| improve | sweep | 1000-ms | ? | 2,756 | 26% | +0.31 |
-| improve | sweep | 0-5ms | ? | 2,118 | 20% | -0.90 |
-| join | partial | 1000-ms | 1000-ms | 1,168 | 11% | +0.13 |
-| join | partial | 0-5ms | ? | 996 | 9% | -0.65 |
-| improve | partial | 1000-ms | 1000-ms | 748 | 7% | +0.30 |
-| join | sweep | 0-5ms | ? | 645 | 6% | -1.03 |
-| join | partial | 1000-ms | ? | 626 | 6% | +0.41 |
-| improve | partial | 0-5ms | ? | 475 | 4% | -0.38 |
-| improve | sweep | 200-1000ms | ? | 215 | 2% | +0.59 |
-| join | sweep | 1000-ms | ? | 205 | 2% | -0.74 |
-| improve | sweep | 50-200ms | ? | 183 | 2% | +0.11 |
-| improve | sweep | 16-50ms | ? | 95 | 1% | -1.58 |
-| improve | partial | 200-1000ms | 200-1000ms | 84 | 1% | -0.49 |
-| improve | partial | 50-200ms | 50-200ms | 70 | 1% | +1.31 |
-| join | sweep | 1000-ms | 1000-ms | 42 | 0% | -0.77 |
-| improve | partial | 16-50ms | 16-50ms | 34 | 0% | +0.46 |
-| join | partial | 200-1000ms | 200-1000ms | 16 | 0% | -0.56 |
-| join | sweep | 5-16ms | ? | 15 | 0% | -1.90 |
-| join | sweep | 50-200ms | ? | 15 | 0% | -0.07 |
-| improve | partial | 5-16ms | 5-16ms | 14 | 0% | -0.29 |
-| join | sweep | 200-1000ms | ? | 13 | 0% | +0.31 |
-| join | partial | 50-200ms | 50-200ms | 13 | 0% | +1.27 |
-| join | sweep | 16-50ms | ? | 13 | 0% | -0.85 |
-| improve | partial | 0-5ms | 0-5ms | 6 | 0% | +5.42 |
+| improve | sweep | 1000-ms | ? | 6,499 | 27% | +0.33 |
+| improve | sweep | 0-5ms | ? | 6,119 | 25% | -0.55 |
+| join | partial | 1000-ms | 1000-ms | 1,972 | 8% | +0.18 |
+| join | partial | 0-5ms | ? | 1,777 | 7% | -0.88 |
+| improve | partial | 1000-ms | 1000-ms | 1,623 | 7% | +0.17 |
+| join | sweep | 0-5ms | ? | 1,366 | 6% | -1.21 |
+| improve | sweep | 200-1000ms | ? | 1,038 | 4% | +0.76 |
+| improve | partial | 0-5ms | ? | 1,012 | 4% | -0.96 |
+| join | partial | 1000-ms | ? | 741 | 3% | +0.41 |
+| improve | sweep | 50-200ms | ? | 687 | 3% | -0.74 |
+| join | sweep | 1000-ms | ? | 289 | 1% | -0.34 |
+| improve | sweep | 16-50ms | ? | 250 | 1% | -0.61 |
+| improve | partial | 200-1000ms | 200-1000ms | 191 | 1% | +0.36 |
+| improve | partial | 50-200ms | 50-200ms | 162 | 1% | -0.18 |
+| improve | partial | 16-50ms | 16-50ms | 99 | 0% | +0.50 |
+| join | sweep | 1000-ms | 1000-ms | 72 | 0% | -0.72 |
+| join | partial | 200-1000ms | 200-1000ms | 46 | 0% | -0.04 |
+| improve | partial | 5-16ms | 5-16ms | 40 | 0% | -1.95 |
+| join | sweep | 16-50ms | ? | 29 | 0% | +0.31 |
+| join | sweep | 200-1000ms | ? | 26 | 0% | -2.00 |
+| join | sweep | 5-16ms | ? | 20 | 0% | -3.13 |
+| join | partial | 50-200ms | 50-200ms | 19 | 0% | -1.22 |
+| improve | partial | 0-5ms | 0-5ms | 18 | 0% | -5.47 |
+| join | sweep | 50-200ms | ? | 16 | 0% | -1.59 |
 | **by kind/class** | | | | | | |
-| improve | sweep | — | — | 5,372 | 51% | -0.20 |
-| join | partial | — | — | 2,828 | 27% | -0.08 |
-| improve | partial | — | — | 1,430 | 14% | +0.09 |
-| join | sweep | — | — | 950 | 9% | -0.94 |
+| improve | sweep | — | — | 14,616 | 60% | -0.07 |
+| join | partial | — | — | 4,569 | 19% | -0.20 |
+| improve | partial | — | — | 3,149 | 13% | -0.25 |
+| join | sweep | — | — | 1,839 | 8% | -1.08 |
 
 touch joiner, depth >= 50: our fills by kind / sweep / age of the touch price / age of the level (mo30 ¢, share of contracts)
 
 | kind | class | touch age | level age | contracts | share | mo30 ¢ |
 |---|---|---|---|---|---|---|
-| improve | sweep | 1000-ms | ? | 1,922 | 29% | +0.09 |
-| improve | sweep | 0-5ms | ? | 1,764 | 26% | -0.92 |
-| join | partial | 1000-ms | ? | 693 | 10% | +0.46 |
-| join | partial | 1000-ms | 1000-ms | 618 | 9% | +0.21 |
-| join | partial | 0-5ms | ? | 438 | 7% | -0.75 |
-| improve | partial | 1000-ms | 1000-ms | 386 | 6% | +0.26 |
-| improve | sweep | 200-1000ms | ? | 209 | 3% | +0.45 |
-| join | sweep | 0-5ms | ? | 165 | 2% | -1.25 |
-| improve | sweep | 50-200ms | ? | 159 | 2% | -0.02 |
-| join | sweep | 1000-ms | ? | 86 | 1% | -0.12 |
-| improve | sweep | 16-50ms | ? | 65 | 1% | +0.70 |
-| improve | partial | 0-5ms | ? | 48 | 1% | -0.24 |
-| improve | partial | 200-1000ms | 200-1000ms | 27 | 0% | +0.26 |
-| improve | partial | 50-200ms | 50-200ms | 21 | 0% | +0.36 |
-| improve | sweep | 0-5ms | 1000-ms | 20 | 0% | -3.50 |
-| join | partial | 200-1000ms | 200-1000ms | 14 | 0% | -0.22 |
-| improve | partial | 16-50ms | 16-50ms | 10 | 0% | +0.55 |
-| join | sweep | 1000-ms | 1000-ms | 7 | 0% | -3.86 |
-| improve | partial | 5-16ms | 5-16ms | 5 | 0% | +2.60 |
-| join | sweep | 200-1000ms | ? | 4 | 0% | +0.12 |
-| join | sweep | 5-16ms | ? | 4 | 0% | -1.25 |
-| improve | sweep | 5-16ms | ? | 2 | 0% | +1.46 |
-| improve | sweep | 200-1000ms | 200-1000ms | 2 | 0% | -3.50 |
-| join | partial | 50-200ms | ? | 1 | 0% | -1.50 |
+| improve | sweep | 1000-ms | ? | 5,028 | 36% | +0.39 |
+| improve | sweep | 0-5ms | ? | 4,279 | 30% | -0.71 |
+| join | partial | 1000-ms | 1000-ms | 1,048 | 7% | +0.26 |
+| join | partial | 1000-ms | ? | 722 | 5% | +0.48 |
+| join | partial | 0-5ms | ? | 699 | 5% | -0.68 |
+| improve | sweep | 200-1000ms | ? | 548 | 4% | -0.16 |
+| improve | partial | 1000-ms | 1000-ms | 536 | 4% | +0.19 |
+| improve | sweep | 50-200ms | ? | 377 | 3% | +0.41 |
+| join | sweep | 0-5ms | ? | 324 | 2% | -1.15 |
+| improve | sweep | 16-50ms | ? | 159 | 1% | -0.79 |
+| join | sweep | 1000-ms | ? | 103 | 1% | -0.22 |
+| improve | partial | 0-5ms | ? | 98 | 1% | -0.95 |
+| improve | partial | 200-1000ms | 200-1000ms | 55 | 0% | -0.58 |
+| improve | partial | 50-200ms | 50-200ms | 54 | 0% | -0.85 |
+| join | sweep | 1000-ms | 1000-ms | 27 | 0% | -1.59 |
+| improve | partial | 5-16ms | 5-16ms | 20 | 0% | +1.30 |
+| improve | partial | 16-50ms | 16-50ms | 17 | 0% | +0.32 |
+| join | sweep | 16-50ms | ? | 17 | 0% | +0.50 |
+| improve | partial | 0-5ms | 0-5ms | 9 | 0% | +0.89 |
+| join | sweep | 200-1000ms | ? | 8 | 0% | -1.69 |
+| join | partial | 200-1000ms | 200-1000ms | 7 | 0% | -1.29 |
+| improve | sweep | 50-200ms | 1000-ms | 4 | 0% | -2.00 |
+| improve | sweep | 5-16ms | ? | 3 | 0% | -1.19 |
+| join | sweep | 5-16ms | ? | 3 | 0% | -4.83 |
 | **by kind/class** | | | | | | |
-| improve | sweep | — | — | 4,143 | 62% | -0.33 |
-| join | partial | — | — | 1,766 | 26% | +0.06 |
-| improve | partial | — | — | 498 | 7% | +0.26 |
-| join | sweep | — | — | 268 | 4% | -0.93 |
+| improve | sweep | — | — | 10,399 | 73% | -0.11 |
+| join | partial | — | — | 2,482 | 18% | +0.06 |
+| improve | partial | — | — | 789 | 6% | -0.04 |
+| join | sweep | — | — | 484 | 3% | -0.95 |
 
 join only, never improve: our fills by kind / sweep / age of the touch price / age of the level (mo30 ¢, share of contracts)
 
 | kind | class | touch age | level age | contracts | share | mo30 ¢ |
 |---|---|---|---|---|---|---|
-| join | partial | 0-5ms | ? | 2,105 | 34% | -0.14 |
-| join | partial | 1000-ms | 1000-ms | 1,861 | 30% | +0.18 |
-| join | sweep | 0-5ms | ? | 1,152 | 18% | -0.32 |
-| join | partial | 1000-ms | ? | 978 | 16% | +0.60 |
-| join | sweep | 1000-ms | 1000-ms | 100 | 2% | -0.17 |
-| join | partial | 200-1000ms | 200-1000ms | 24 | 0% | +1.56 |
-| join | sweep | 5-16ms | ? | 14 | 0% | -0.17 |
-| join | sweep | 1000-ms | ? | 13 | 0% | -1.80 |
-| join | partial | 200-1000ms | ? | 13 | 0% | +4.64 |
-| join | partial | 200-1000ms | 1000-ms | 4 | 0% | +2.62 |
-| join | sweep | 200-1000ms | 1000-ms | 4 | 0% | -3.88 |
-| join | sweep | 200-1000ms | 200-1000ms | 4 | 0% | +2.08 |
-| join | sweep | 50-200ms | 50-200ms | 2 | 0% | -3.50 |
-| join | partial | 5-16ms | ? | 1 | 0% | -3.44 |
-| join | partial | 50-200ms | 50-200ms | 1 | 0% | -3.50 |
-| join | sweep | 16-50ms | 16-50ms | 1 | 0% | +5.50 |
+| join | partial | 0-5ms | ? | 4,374 | 35% | -0.16 |
+| join | partial | 1000-ms | 1000-ms | 3,744 | 30% | +0.39 |
+| join | sweep | 0-5ms | ? | 2,826 | 23% | -0.06 |
+| join | partial | 1000-ms | ? | 1,120 | 9% | +0.85 |
+| join | sweep | 1000-ms | 1000-ms | 130 | 1% | -1.25 |
+| join | partial | 200-1000ms | 200-1000ms | 83 | 1% | +1.24 |
+| join | partial | 50-200ms | 50-200ms | 74 | 1% | +1.68 |
+| join | sweep | 1000-ms | ? | 45 | 0% | -1.60 |
+| join | partial | 200-1000ms | 1000-ms | 27 | 0% | +2.61 |
+| join | sweep | 5-16ms | ? | 26 | 0% | -0.51 |
+| join | partial | 200-1000ms | ? | 13 | 0% | +4.80 |
+| join | sweep | 200-1000ms | 200-1000ms | 11 | 0% | +1.18 |
+| join | partial | 50-200ms | 1000-ms | 9 | 0% | +0.28 |
+| join | sweep | 200-1000ms | 1000-ms | 8 | 0% | -2.75 |
+| join | sweep | 50-200ms | 50-200ms | 4 | 0% | +0.50 |
+| join | partial | 5-16ms | ? | 3 | 0% | -2.16 |
+| join | partial | 16-50ms | 16-50ms | 3 | 0% | +5.33 |
+| join | partial | 16-50ms | 1000-ms | 2 | 0% | +0.50 |
+| join | sweep | 200-1000ms | ? | 1 | 0% | -14.21 |
+| join | partial | 16-50ms | 50-200ms | 1 | 0% | +2.00 |
+| join | sweep | 16-50ms | 16-50ms | 1 | 0% | +0.50 |
+| join | sweep | 50-200ms | ? | 0 | 0% | +3.50 |
 | **by kind/class** | | | | | | |
-| join | partial | — | — | 4,987 | 79% | +0.15 |
-| join | sweep | — | — | 1,291 | 21% | -0.33 |
+| join | partial | — | — | 9,452 | 76% | +0.22 |
+| join | sweep | — | — | 3,052 | 24% | -0.14 |
 
 touch joiner, pessimistic queue: our fills by kind / sweep / age of the touch price / age of the level (mo30 ¢, share of contracts)
 
 | kind | class | touch age | level age | contracts | share | mo30 ¢ |
 |---|---|---|---|---|---|---|
-| improve | sweep | 1000-ms | ? | 1,725 | 29% | +0.30 |
-| improve | sweep | 0-5ms | ? | 1,520 | 26% | -1.22 |
-| join | sweep | 0-5ms | ? | 638 | 11% | -0.81 |
-| improve | partial | 1000-ms | 1000-ms | 464 | 8% | +0.40 |
-| join | partial | 1000-ms | 1000-ms | 336 | 6% | +0.20 |
-| improve | partial | 0-5ms | ? | 259 | 4% | -0.48 |
-| join | partial | 0-5ms | ? | 246 | 4% | -0.44 |
-| join | sweep | 1000-ms | ? | 160 | 3% | -0.57 |
-| improve | sweep | 200-1000ms | ? | 115 | 2% | +1.63 |
-| join | partial | 1000-ms | ? | 96 | 2% | +0.36 |
-| improve | sweep | 50-200ms | ? | 87 | 1% | +0.40 |
-| improve | partial | 200-1000ms | 200-1000ms | 47 | 1% | -0.39 |
-| join | sweep | 1000-ms | 1000-ms | 44 | 1% | +0.60 |
-| improve | partial | 50-200ms | 50-200ms | 38 | 1% | +1.22 |
-| improve | sweep | 16-50ms | ? | 37 | 1% | +0.19 |
-| join | sweep | 200-1000ms | ? | 16 | 0% | +1.12 |
-| join | sweep | 5-16ms | ? | 8 | 0% | -2.06 |
-| join | sweep | 50-200ms | ? | 7 | 0% | -0.36 |
-| improve | partial | 5-16ms | 5-16ms | 6 | 0% | +0.33 |
-| improve | partial | 16-50ms | 16-50ms | 5 | 0% | +1.80 |
-| join | partial | 200-1000ms | 200-1000ms | 5 | 0% | -1.70 |
-| join | sweep | 16-50ms | ? | 5 | 0% | -0.70 |
-| join | sweep | 16-50ms | 16-50ms | 3 | 0% | +0.83 |
-| join | partial | 50-200ms | 50-200ms | 3 | 0% | +0.17 |
+| improve | sweep | 1000-ms | ? | 4,552 | 29% | +0.43 |
+| improve | sweep | 0-5ms | ? | 4,420 | 29% | -0.59 |
+| join | sweep | 0-5ms | ? | 1,452 | 9% | -1.20 |
+| improve | partial | 1000-ms | 1000-ms | 1,035 | 7% | +0.42 |
+| improve | partial | 0-5ms | ? | 660 | 4% | -0.63 |
+| join | partial | 1000-ms | 1000-ms | 656 | 4% | +0.19 |
+| join | partial | 0-5ms | ? | 597 | 4% | -0.84 |
+| improve | sweep | 200-1000ms | ? | 529 | 3% | +1.14 |
+| improve | sweep | 50-200ms | ? | 393 | 3% | +0.99 |
+| join | sweep | 1000-ms | ? | 308 | 2% | -0.60 |
+| improve | sweep | 16-50ms | ? | 160 | 1% | +0.77 |
+| improve | partial | 200-1000ms | 200-1000ms | 151 | 1% | -0.63 |
+| join | partial | 1000-ms | ? | 137 | 1% | +0.32 |
+| improve | partial | 50-200ms | 50-200ms | 105 | 1% | +0.38 |
+| join | sweep | 1000-ms | 1000-ms | 58 | 0% | -0.90 |
+| improve | partial | 16-50ms | 16-50ms | 40 | 0% | +0.00 |
+| join | sweep | 200-1000ms | ? | 38 | 0% | +0.51 |
+| improve | partial | 5-16ms | 5-16ms | 38 | 0% | -0.38 |
+| join | sweep | 50-200ms | ? | 27 | 0% | -0.48 |
+| join | sweep | 5-16ms | ? | 26 | 0% | -3.40 |
+| join | partial | 50-200ms | 50-200ms | 17 | 0% | +0.85 |
+| join | partial | 200-1000ms | 200-1000ms | 17 | 0% | -0.97 |
+| improve | sweep | 1000-ms | 1000-ms | 14 | 0% | -0.36 |
+| join | sweep | 16-50ms | ? | 13 | 0% | -1.00 |
 | **by kind/class** | | | | | | |
-| improve | sweep | — | — | 3,488 | 59% | -0.32 |
-| join | sweep | — | — | 883 | 15% | -0.67 |
-| improve | partial | — | — | 821 | 14% | +0.14 |
-| join | partial | — | — | 690 | 12% | -0.04 |
+| improve | sweep | — | — | 10,071 | 65% | +0.04 |
+| improve | partial | — | — | 2,036 | 13% | -0.02 |
+| join | sweep | — | — | 1,934 | 12% | -1.10 |
+| join | partial | — | — | 1,431 | 9% | -0.23 |
 
 touch joiner, carry (no flatten): our fills by kind / sweep / age of the touch price / age of the level (mo30 ¢, share of contracts)
 
 | kind | class | touch age | level age | contracts | share | mo30 ¢ |
 |---|---|---|---|---|---|---|
-| improve | sweep | 1000-ms | ? | 1,435 | 20% | +0.23 |
-| improve | sweep | 0-5ms | ? | 1,339 | 19% | -0.57 |
-| join | partial | 1000-ms | 1000-ms | 907 | 13% | +0.15 |
-| join | partial | 0-5ms | ? | 800 | 11% | -0.75 |
-| join | partial | 1000-ms | ? | 696 | 10% | +0.42 |
-| improve | partial | 1000-ms | 1000-ms | 557 | 8% | +0.44 |
-| join | sweep | 0-5ms | ? | 440 | 6% | -1.15 |
-| improve | partial | 0-5ms | ? | 283 | 4% | -0.38 |
-| join | sweep | 1000-ms | ? | 136 | 2% | -0.54 |
-| improve | sweep | 200-1000ms | ? | 120 | 2% | +1.04 |
-| improve | sweep | 50-200ms | ? | 107 | 2% | -0.59 |
-| improve | partial | 50-200ms | 50-200ms | 59 | 1% | +0.14 |
-| improve | partial | 200-1000ms | 200-1000ms | 49 | 1% | -0.50 |
-| improve | sweep | 16-50ms | ? | 39 | 1% | +0.19 |
-| join | sweep | 1000-ms | 1000-ms | 33 | 0% | -1.22 |
-| improve | partial | 16-50ms | 16-50ms | 18 | 0% | +1.58 |
-| join | partial | 200-1000ms | 200-1000ms | 13 | 0% | -0.46 |
-| join | sweep | 200-1000ms | ? | 11 | 0% | +2.36 |
-| join | sweep | 5-16ms | ? | 8 | 0% | -2.51 |
-| join | sweep | 16-50ms | ? | 5 | 0% | -0.30 |
-| join | sweep | 50-200ms | ? | 4 | 0% | +1.62 |
-| join | partial | 50-200ms | 50-200ms | 4 | 0% | -0.38 |
-| improve | partial | 5-16ms | 5-16ms | 4 | 0% | -0.50 |
-| join | sweep | 200-1000ms | 200-1000ms | 3 | 0% | -5.17 |
+| improve | sweep | 0-5ms | ? | 3,726 | 26% | -0.42 |
+| improve | sweep | 1000-ms | ? | 3,602 | 25% | +0.28 |
+| join | partial | 1000-ms | 1000-ms | 1,498 | 10% | +0.23 |
+| join | partial | 0-5ms | ? | 1,308 | 9% | -0.84 |
+| improve | partial | 1000-ms | 1000-ms | 890 | 6% | +0.46 |
+| join | sweep | 0-5ms | ? | 868 | 6% | -1.54 |
+| join | partial | 1000-ms | ? | 714 | 5% | +0.42 |
+| improve | partial | 0-5ms | ? | 510 | 4% | -0.64 |
+| improve | sweep | 200-1000ms | ? | 466 | 3% | +0.08 |
+| improve | sweep | 50-200ms | ? | 284 | 2% | +0.74 |
+| join | sweep | 1000-ms | ? | 202 | 1% | -0.49 |
+| improve | sweep | 16-50ms | ? | 89 | 1% | +0.57 |
+| improve | partial | 200-1000ms | 200-1000ms | 76 | 1% | -0.65 |
+| improve | partial | 50-200ms | 50-200ms | 75 | 1% | +0.89 |
+| improve | partial | 16-50ms | 16-50ms | 53 | 0% | +0.32 |
+| join | sweep | 1000-ms | 1000-ms | 35 | 0% | -0.68 |
+| join | sweep | 200-1000ms | ? | 24 | 0% | +0.02 |
+| join | partial | 200-1000ms | 200-1000ms | 24 | 0% | -0.11 |
+| join | sweep | 200-1000ms | 1000-ms | 18 | 0% | -5.64 |
+| improve | partial | 5-16ms | 5-16ms | 12 | 0% | +0.29 |
+| join | sweep | 16-50ms | ? | 11 | 0% | -1.95 |
+| join | sweep | 50-200ms | ? | 10 | 0% | -1.93 |
+| join | sweep | 5-16ms | ? | 8 | 0% | -4.14 |
+| join | partial | 50-200ms | 50-200ms | 5 | 0% | -2.60 |
 | **by kind/class** | | | | | | |
-| improve | sweep | — | — | 3,046 | 43% | -0.12 |
-| join | partial | — | — | 2,424 | 34% | -0.07 |
-| improve | partial | — | — | 971 | 14% | +0.16 |
-| join | sweep | — | — | 641 | 9% | -0.98 |
+| improve | sweep | — | — | 8,170 | 56% | -0.04 |
+| join | partial | — | — | 3,553 | 24% | -0.13 |
+| improve | partial | — | — | 1,619 | 11% | +0.07 |
+| join | sweep | — | — | 1,178 | 8% | -1.40 |

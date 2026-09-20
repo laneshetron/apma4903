@@ -2,9 +2,9 @@
 
 | config | markets | pnl_$ | pnl_per_market_$ | t_stat | contracts | fill_markout_30s_c |
 |---|---|---|---|---|---|---|
-| touch joiner | 265 | -33.12 | -0.12 | -3.37 | 4,135 | -0.26 |
-| touch joiner, size 5 | 265 | -43.80 | -0.17 | -5.46 | 5,605 | -0.18 |
-| touch joiner, depth >= 50 | 265 | -21.03 | -0.08 | -2.37 | 3,100 | -0.18 |
-| join only, never improve | 265 | -22.30 | -0.08 | -2.23 | 3,181 | 0.05 |
-| touch joiner, pessimistic queue | 265 | -17.38 | -0.07 | -1.90 | 2,811 | -0.27 |
-| touch joiner, carry (no flatten) | 265 | -3.57 | -0.01 | -0.43 | 3,764 | -0.13 |
+| touch joiner | 442 | -25.44 | -0.06 | -1.77 | 11,391 | -0.07 |
+| touch joiner, size 5 | 442 | -86.25 | -0.20 | -6.82 | 17,215 | -0.19 |
+| touch joiner, depth >= 50 | 442 | -31.71 | -0.07 | -2.14 | 9,415 | -0.09 |
+| join only, never improve | 442 | -10.11 | -0.02 | -0.63 | 8,309 | 0.13 |
+| touch joiner, pessimistic queue | 442 | -53.08 | -0.12 | -3.76 | 10,714 | -0.12 |
+| touch joiner, carry (no flatten) | 442 | -17.37 | -0.04 | -1.31 | 10,233 | -0.15 |

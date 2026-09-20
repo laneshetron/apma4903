@@ -697,3 +697,17 @@ Same setup; books warm-started from 09-19 where a market's subscription snapshot
 | Serie A / Ligue 1 totals | 2 / 4 | dust | | |
 
 Every configuration negative on every series with a real sample (size 5, depth gate, join-only, pessimistic, carry — all). On the biggest books (EPL winners and totals) the loss is $4–8 per market, and the fill mix says why: 27% of EPL-totals volume is "improve on a fresh price, swept" at −0.96¢ — we post inside the spread and are run over by the goal. The 09-19 EFL result (+$2.58/mkt on 12 markets) was variance. Conclusion for in-play sports as a passive quoter: the wide spread is not protection; the informed flow is anyone with a faster score feed, on a timescale of seconds, and a quoter with no score-aware fair value is its counterparty. The only version of this that could work is a maker whose fair value reprices on the goal before the flow arrives (a Poisson goal model on live score/clock), which is a different product needing a score feed — untested.
+
+### Where the in-play loss lives (`event_windows.py`, EPL totals 09-20, 728 detected information events)
+
+| bucket (relative to nearest ≥5¢ mid jump) | market share / maker mo30 | our share / mo30 | half-spread at fill, market vs us |
+|---|---|---|---|
+| hit (≤ 5 s before) | 4% / +1.64¢ | **16% / −0.93¢** | 2.58¢ vs 1.18¢ |
+| post 0–5 s | 3% / +0.56¢ | 8% / −1.27¢ | 1.98 vs 1.17 |
+| post 5–30 s | 11% / +0.38¢ | 15% / +0.07¢ | |
+| post 30–120 s | 24% / +0.28¢ | 23% / −0.12¢ | |
+| quiet | 58% / **+0.46¢** | 38% / **−0.04¢** | 0.46 vs 0.26 |
+
+The market's makers earn in every bucket, including at the goal — the ones still quoting then have widened to 2.6¢. We are hit 4× as often as the market and lose on it because we improve 1.2¢ *inside* the spread they just widened: the wide spread is the information state, and improving into it makes us the tightest quote at the worst moment. Between events we capture 0.26¢ where they capture 0.46¢ — the same mechanism in miniature.
+
+Rules keyed on that (`sim --inplay`, 09-20): EPL totals — join-only + 10 s pause after a jump **+$0.24/mkt (t 0.3)** vs −4.21 baseline; join-only −1.05; no-improve-when-wide −0.82; pause 30 s −1.11. EPL winners — best is join-only + pause −2.99 vs −8.08. So the rules remove most of the loss (the improve-into-a-widening-spread part) but leave nothing behind: joining the touch in-play still nets ≈ 0 to −3/market, with ~$35–45 of unrealized inventory swing per series at the tape's end. The margin the market's makers collect in the quiet 58% (+0.46¢) is not collected by a touch-joiner behind them.

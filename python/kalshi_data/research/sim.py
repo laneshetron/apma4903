@@ -91,6 +91,10 @@ class Params:
     signal_move: float | None = None  # $ over 1s on the spot mid; None disables
     max_ttx_h: float | None = None          # only quote markets closing within this many hours (multi-market series)
     global_capital: bool = False            # capital is shared across all markets of the series (multi-market)
+    wide_spread_ticks: float | None = None   # spread wider than this many ticks = information state: no improve (join only) ...
+    wide_spread_pull: bool = False           # ... or no quoting at all while the spread is that wide
+    post_jump_pause_s: float | None = None   # after the mid moves >= post_jump_c within 2 s, no quoting for this long
+    post_jump_c: float = 5.0
     min_touch_age_ms: float | None = None   # only quote when our side's touch PRICE has been the best this long
     improve_only: bool = False        # quote only when the spread allows an improve (never join a touch)
     no_improve: bool = False          # never improve; join only
@@ -214,6 +218,9 @@ class Quoter:
         self.fair_hist: dict[str, deque] = defaultdict(deque)   # ticker -> (rx_ns, fair_c) for the window variant
         self.fill_mo: deque = deque()   # (deadline_ns, ticker, sign, price_cents, qty, horizon) for markouts of our fills
         self.fill_markouts: dict[int, list[tuple[float, int]]] = {10: [], 30: []}  # horizon -> (markout cents, qty)
+        self.mid_hist: dict[str, deque] = defaultdict(deque)   # ticker -> (rx, mid) last 2 s, for post-jump pauses
+        self.jump_until: dict[str, int] = defaultdict(int)
+        self.fill_log: list | None = None   # (ticker, rx, side, price, qty, improved, sweep) when --fills-out is set
         self.fill_by: dict[tuple, list[float]] = {}   # (improve|join, sweep|partial, age-of-touch bucket, age-of-level bucket) -> [mo30*qty, qty]
         self.best_since: dict[str, dict[str, int]] = defaultdict(dict)   # ticker -> side -> rx the current best price became best
         self._last_best: dict[str, dict[str, int]] = defaultdict(dict)
@@ -262,6 +269,8 @@ class Quoter:
         age_born = (rx - born) / 1e6 if born is not None else float("nan")
         age_best = (rx - bs) / 1e6 if bs is not None else float("nan")
         fkey = ("improve" if o.improved else "join", "sweep" if sweep else "partial", _age_bucket(age_best), _age_bucket(age_born))
+        if self.fill_log is not None:
+            self.fill_log.append((tk, rx, o.side, o.price, min(qty, o.remaining), o.improved, sweep))
         qty = min(qty, o.remaining)
         if qty <= 0:
             return
@@ -354,6 +363,13 @@ class Quoter:
             r.inventory_pnl += (r.pos / QTY) * (mid - r.last_mid) / 100
         if mid is not None:
             r.last_mid = mid
+            if self.p.post_jump_pause_s is not None:
+                h = self.mid_hist[tk]
+                h.append((rx, mid))
+                while h and h[0][0] < rx - 2_000_000_000:
+                    h.popleft()
+                if abs(mid - h[0][1]) >= self.p.post_jump_c:
+                    self.jump_until[tk] = rx + int(self.p.post_jump_pause_s * 1e9)
         self.resolve_markouts(tk, rx, book)
         if before == 0 and after > 0:
             self.level_born[tk][(side, price)] = rx
@@ -603,6 +619,19 @@ class Quoter:
                 if allow[s] and not improve[s] and (bs is None or rx - bs < p.min_touch_age_ms * 1e6):
                     allow[s] = False
                     self.vetoes["young_touch"] += 1
+        if p.wide_spread_ticks is not None:
+            for s in ("yes", "no"):
+                if spread > p.wide_spread_ticks * tick[s]:
+                    if p.wide_spread_pull:
+                        allow[s] = False
+                        self.vetoes["wide_spread"] += 1
+                    elif improve[s]:
+                        improve[s] = False
+                        want[s] -= tick[s]   # join the touch instead of improving into an information-state spread
+                        self.vetoes["wide_no_improve"] += 1
+        if p.post_jump_pause_s is not None and rx < self.jump_until[tk]:
+            allow = {"yes": False, "no": False}
+            self.vetoes["post_jump"] += 2
         if p.improve_only:
             for s in ("yes", "no"):
                 if allow[s] and not improve[s]:
@@ -1435,6 +1464,20 @@ NONCRYPTO = [
     Params("touch joiner, carry (no flatten)", **{**_NC, "flatten_at_stop": False}),
 ]
 
+# in-play sports: the spread is the market's event detector
+INPLAY = [
+    Params("touch joiner (baseline)", **_NC),
+    Params("no improve when spread > 2 ticks", **_NC, wide_spread_ticks=2),
+    Params("no improve when spread > 1 tick (join only)", **_NC, no_improve=True),
+    Params("pull when spread > 3 ticks", **_NC, wide_spread_ticks=3, wide_spread_pull=True),
+    Params("pull when spread > 2 ticks", **_NC, wide_spread_ticks=2, wide_spread_pull=True),
+    Params("pause 10 s after a 5c jump", **_NC, post_jump_pause_s=10),
+    Params("pause 30 s after a 5c jump", **_NC, post_jump_pause_s=30),
+    Params("join only + pause 10 s", **_NC, no_improve=True, post_jump_pause_s=10),
+    Params("pull > 2 ticks + pause 10 s", **_NC, wide_spread_ticks=2, wide_spread_pull=True, post_jump_pause_s=10),
+    Params("pull > 2 ticks + pause 10 s, size 5", **{**_NC, "size": 5, "max_pos": 5}, wide_spread_ticks=2, wide_spread_pull=True, post_jump_pause_s=10),
+]
+
 # KXBTCD: hourly-settling strips of strikes, each alive ~25 h. Quote all strikes closing within max_ttx_h; capital shared.
 _HR = dict(signal_move=2.0, stop_before_s=300, greeks_cap=0.05, price_priority=True, engine_lag_ms=6.0,
            place_latency_ms=9, cancel_latency_ms=5, signal_latency_ms=11, size=20, max_pos=20, capital=300, global_capital=True, flatten_at_stop=True)
@@ -1680,7 +1723,9 @@ def main() -> None:
     ap.add_argument("--eval3", action="store_true", help="depth-gate threshold sweep")
     ap.add_argument("--eval4", action="store_true", help="depth gate under the pessimistic (no advancement) queue")
     ap.add_argument("--baseline", action="store_true", help="the live/paper configuration only (for paper_vs_sim)")
+    ap.add_argument("--inplay", action="store_true", help="in-play sports rule set")
     ap.add_argument("--noncrypto", action="store_true", help="non-crypto configuration set (use --series <series>, --no-spot)")
+    ap.add_argument("--fills-out", type=Path, default=None, help="write every fill of the FIRST config to this parquet")
     ap.add_argument("--warm-days", type=int, default=0, help="rebuild books from this many earlier days first (broad tape)")
     ap.add_argument("--no-spot", action="store_true", help="do not merge the spot feeds (series with no spot reference)")
     ap.add_argument("--hourly", action="store_true", help="KXBTCD configuration set (use --series KXBTCD)")
@@ -1695,7 +1740,7 @@ def main() -> None:
     ap.add_argument("--sizes", action="store_true", help="depth 1000 size sweep under both queue models")
     ap.add_argument("--depth1000", action="store_true", help="the paper configuration from 2026-09-17 16:22 UTC: baseline + min depth 1000")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else NONCRYPTO if a.noncrypto else HOURLY if a.hourly else OLD if a.old else DIAG if a.diag else (ETHSET if a.eth_part == 0 else ETHSET[:5] if a.eth_part == 1 else ETHSET[5:]) if a.eth else _veto_set(str(a.day), a.series) if a.veto else SIGIMP if a.sigimp else LATENCY2 if a.latency2 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else INPLAY if a.inplay else NONCRYPTO if a.noncrypto else HOURLY if a.hourly else OLD if a.old else DIAG if a.diag else (ETHSET if a.eth_part == 0 else ETHSET[:5] if a.eth_part == 1 else ETHSET[5:]) if a.eth else _veto_set(str(a.day), a.series) if a.veto else SIGIMP if a.sigimp else LATENCY2 if a.latency2 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
     if a.chunk:
         i, n = (int(x) for x in a.chunk.split("/"))
         per = -(-len(configs) // n)
@@ -1711,6 +1756,14 @@ def main() -> None:
             rows.append(f"| {r['name']} | {r['markets']} | {r['pnl_$']:.2f} | {r['pnl_per_market_$']:.2f} | {r['t_stat']:.2f} | {r['contracts']:,.0f} | {r['fill_markout_30s_c']:.2f} |")
         Path(str(a.out) + ".partial.md").write_text("\n".join(rows))
 
+    if a.fills_out:
+        _fill_sink: list = []
+        _orig_init = Quoter.__init__
+        def _patched(self, p, _o=_orig_init):
+            _o(self, p)
+            if p is configs[0]:
+                self.fill_log = _fill_sink
+        Quoter.__init__ = _patched
     res, test_from = run(a.data_dir, a.day, a.series, a.venue, configs, Path("../research") / f"alpha_{a.tables_from or a.day}.parquet",
                          train_frac=1.0 if a.tables_from else 0.6, checkpoint=checkpoint, no_spot=a.no_spot, warm_days=a.warm_days)
     cols = ["markets", "pnl_$", "spread_$", "inventory_$", "adverse_10s_$", "test_markets", "test_pnl_$", "test_spread_$", "test_inventory_$", "realized_$", "unrealized_$", "pnl_per_market_$", "pnl_sd_$", "t_stat", "worst_$", "contracts", "pnl_c_per_contract", "fill_markout_30s_c", "improved_fill_%", "fill_share_%", "fills", "avg_max_pos", "end_pos_abs", "flatten_cost_$"]
@@ -1753,6 +1806,10 @@ def main() -> None:
     print(text)
     if a.out:
         a.out.write_text(text)
+    if a.fills_out:
+        pl.DataFrame({"ticker": [x[0] for x in _fill_sink], "rx": [x[1] for x in _fill_sink], "side": [x[2] for x in _fill_sink],
+                      "price": [x[3] for x in _fill_sink], "qty": [x[4] for x in _fill_sink], "improved": [x[5] for x in _fill_sink],
+                      "sweep": [x[6] for x in _fill_sink]}).write_parquet(a.fills_out)
     if a.per_market:
         rows = [{"config": r["name"], "ticker": m.ticker, "stop_rx": m.stop_rx, "pnl": m.mark_pnl, "spread": m.spread_capture,
                  "inventory": m.inventory_pnl, "fills": m.fills, "sweep_fills": m.sweep_fills, "traded": (m.bought + m.sold) / QTY, "market_volume": m.market_volume / QTY,
