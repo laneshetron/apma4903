@@ -666,3 +666,18 @@ KXBTCD = strips of strikes settling every hour on the 60 s BRTI average, each st
 | ≤ 3 h, no gates (first pass) | 75 | −2.59 (−4.2) | | 1,370 | −0.16¢ |
 
 Fill mix (≤ 1 h): join-partial 55% of contracts at **+0.05¢**, improve-partial 20% at **+0.29¢**, improve-sweep 13% at −0.08¢, join-sweep 12% at **−0.95¢**. Unlike the 15-minute books the queue does turn over here (partials are more than half our volume and mildly positive), but the join-sweeps cost as much as everything else earns, and the net is −$0.6/strike-hour, negative in 16 of 20 hours of the day. The survey's +0.10¢ market-wide maker markout on this series is, for a REST joiner, ≈ 0 before and slightly negative after the sweeps. Not a market for the touch-joiner either.
+
+## 2026-09-20 — corrected sim on non-crypto series from the survey (09-19 exchange-wide tape, 20 h)
+
+Setup: linear-cent grid, no spot signal / greeks / strike, close = min(close_time, expected_expiration) from the listing (a game market ends when the game does), $500 capital shared across the series' concurrent markets, size 20 / cap 20, flatten at the stop, markets still open at the end of the tape marked at the last mid.
+
+| series | markets | $/market (t) | total | contracts (all) | fill mo30 | note |
+|---|---|---|---|---|---|---|
+| **KXEFLCHAMPIONSHIPTOTAL** (2nd-tier goals totals, 4.5¢ spread) | 12 | **+2.58 (2.3)** | +$31 | 2,529 | −0.11¢ | every config positive (pessimistic +0.65, size 5 +0.80, carry +3.12); $36 realized; 70% of fills are improves inside the wide spread |
+| KXJLEAGUETOTAL | 4 | −0.60 / +2.81 join-only | | 879 | | too few markets |
+| KXTRUMPAPPROVE | 5 | +1.72 (1.4) | +$8.6 | 424 | +2.26¢ | profitable fills, 85 contracts/market/day |
+| KXNFLGAME (pre-game winners) | 33 | +0.07 | +$2.3 | 731 | +0.36¢ | 22 contracts/market: 5,000-deep touch, 1¢ spread, no way to the front |
+| KXEPLSCORE / KXPRESNOMD | 4 / 8 | ≈ 0 | | 80 / 200 | | dust |
+| KXNCAAFTOTAL / KXNCAAFSPREAD | 535 / 25 (partial) | −0.08 / −0.35 | | 13 / 11 per market | | hundreds of thin markets; run for spreads killed at 72/90 (many-market slowdown) |
+
+Reading: in the slow markets the constraint flips from adverse selection to access. Fills are profitable almost everywhere (+0.4 to +2.3¢) but rare, because the touch is deep and turns over slowly and a 1¢ spread leaves no room to improve. The series that pays is the one with a wide spread: improving by 1¢ inside 4.5¢ puts us first in the queue with ~2¢ of half-spread still captured, and the ~1¢ adverse selection on those fills is affordable. Second day needed (09-20: Sunday football + NFL in-play).

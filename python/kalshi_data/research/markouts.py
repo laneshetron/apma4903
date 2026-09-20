@@ -172,11 +172,66 @@ class MarketState:
 _TICKER_RE = re.compile(r"^([A-Z0-9]+)-(\d\d)([A-Z]{3})(\d\d)(\d\d)(\d\d)?")
 
 
+_CLOSE_TIMES: dict | None = None
+
+
+def _close_from_file(ticker: str) -> float | None:
+    """Fallback for tickers without a parseable date-time: research/close_times.json from the
+    exchange listing; the effective end of trading is min(close_time, expected_expiration_time)."""
+    global _CLOSE_TIMES
+    if _CLOSE_TIMES is None:
+        try:
+            import json
+            from pathlib import Path
+            _CLOSE_TIMES = json.loads((Path(__file__).resolve().parents[3] / "research" / "close_times.json").read_text())
+        except Exception:  # noqa: BLE001
+            _CLOSE_TIMES = {}
+    v = _CLOSE_TIMES.get(ticker)
+    if not v:
+        v = _fetch_close(ticker)
+        if not v:
+            return None
+    if isinstance(v, str):
+        v = {"close": v}
+    ts = []
+    for k in ("close", "exp"):
+        if v.get(k):
+            ts.append(datetime.fromisoformat(v[k].replace("Z", "+00:00")).timestamp())
+    return min(ts) if ts else None
+
+
+def _fetch_close(ticker: str) -> dict | None:
+    """Look a market up on the exchange (rate-limited) and cache it in close_times.json."""
+    import json
+    import time
+    import urllib.request
+    from pathlib import Path
+    try:
+        with urllib.request.urlopen(f"https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}", timeout=20) as r:
+            m = json.load(r).get("market", {})
+        time.sleep(0.12)
+    except Exception:  # noqa: BLE001
+        time.sleep(1.0)
+        return None
+    v = {"close": m.get("close_time"), "exp": m.get("expected_expiration_time"), "open": m.get("open_time")}
+    if not v["close"]:
+        return None
+    _CLOSE_TIMES[ticker] = v
+    try:
+        path = Path(__file__).resolve().parents[3] / "research" / "close_times.json"
+        path.write_text(json.dumps(_CLOSE_TIMES))
+    except Exception:  # noqa: BLE001
+        pass
+    return v
+
+
 def close_time(ticker: str) -> float | None:
-    """Market close (unix s) parsed from the ticker's date-time segment (ET)."""
+    """Market close (unix s) parsed from the ticker's date-time segment (ET), else from the listing file."""
+    if not ticker.startswith(("KXBTC", "KXETH", "KXSOL", "KXXRP")):
+        return _close_from_file(ticker)
     m = _TICKER_RE.match(ticker)
     if not m:
-        return None
+        return _close_from_file(ticker)
     _, yy, mon, dd, hh, mm = m.groups()
     dt = datetime.strptime(f"20{yy}{mon}{dd} {hh}{mm or '00'}", "%Y%b%d %H%M").replace(tzinfo=NY)
     return dt.timestamp()
