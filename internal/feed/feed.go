@@ -477,7 +477,10 @@ func (f *Feed) Resnapshot(ctx context.Context) error {
 			break
 		}
 	}
-	tickers := f.snapshotDesired()
+	// NB: desiredLocked, not snapshotDesired — f.mu is already held here and
+	// sync.RWMutex is not reentrant, so taking the read lock would deadlock the
+	// whole feed (and with it the read loop, the recorder and /status).
+	tickers := f.desiredLocked()
 	f.mu.Unlock()
 	if conn == nil || !found || len(tickers) == 0 {
 		return nil

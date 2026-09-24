@@ -296,3 +296,36 @@ func TestFeedSnapshotDeltaGapAndReconnect(t *testing.T) {
 		return ok && !v.Stale && l.Price.String() == "0.7000"
 	})
 }
+
+// Resnapshot holds f.mu while gathering the ticker list. sync.RWMutex is not
+// reentrant, so an inner RLock there wedges the feed forever — which is exactly
+// what happened at 00:00:05 UTC on 2026-09-21: both collectors kept running and
+// recording nothing, and /status hung, for three and a half days.
+func TestResnapshotDoesNotDeadlockTheFeed(t *testing.T) {
+	f := New(Config{Env: kalshi.Demo, Signer: testSigner(t), Channels: []string{kalshi.ChannelOrderbookDelta}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := f.SetMarkets(ctx, []string{"A", "B"}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- f.Resnapshot(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Resnapshot: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Resnapshot deadlocked")
+	}
+
+	// and the feed must still be usable afterwards (lock released)
+	got := make(chan int, 1)
+	go func() { got <- len(f.Markets()) }()
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("feed still locked after Resnapshot")
+	}
+}
