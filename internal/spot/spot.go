@@ -143,10 +143,16 @@ func venue(name string, assets []string) (Venue, bool) {
 			Heartbeat: map[string]any{"op": "ping"}, HeartbeatEvery: 20 * time.Second,
 		}, true
 	case "hyperliquid":
+		// l2Book is only published every ~5.4 s, so it is useless for a pre-trade
+		// touch -- but it is the only public view of how much size rests away from
+		// the touch, which is what bounds a resting strategy's achievable fill
+		// share. Its 20 levels reach ~12 bp on ZEC and ~7 bp on ETH (only ~2.5 bp
+		// on BTC, whose book is too tight for this to say anything).
 		var subs []any
 		for _, a := range assets {
 			subs = append(subs, map[string]any{"method": "subscribe", "subscription": map[string]any{"type": "trades", "coin": a}},
-				map[string]any{"method": "subscribe", "subscription": map[string]any{"type": "bbo", "coin": a}})
+				map[string]any{"method": "subscribe", "subscription": map[string]any{"type": "bbo", "coin": a}},
+				map[string]any{"method": "subscribe", "subscription": map[string]any{"type": "l2Book", "coin": a}})
 		}
 		return Venue{
 			Name: name, URL: "wss://api.hyperliquid.xyz/ws", Subscribe: subs,
