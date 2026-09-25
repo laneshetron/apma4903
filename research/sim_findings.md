@@ -711,3 +711,49 @@ Every configuration negative on every series with a real sample (size 5, depth g
 The market's makers earn in every bucket, including at the goal — the ones still quoting then have widened to 2.6¢. We are hit 4× as often as the market and lose on it because we improve 1.2¢ *inside* the spread they just widened: the wide spread is the information state, and improving into it makes us the tightest quote at the worst moment. Between events we capture 0.26¢ where they capture 0.46¢ — the same mechanism in miniature.
 
 Rules keyed on that (`sim --inplay`, 09-20): EPL totals — join-only + 10 s pause after a jump **+$0.24/mkt (t 0.3)** vs −4.21 baseline; join-only −1.05; no-improve-when-wide −0.82; pause 30 s −1.11. EPL winners — best is join-only + pause −2.99 vs −8.08. So the rules remove most of the loss (the improve-into-a-widening-spread part) but leave nothing behind: joining the touch in-play still nets ≈ 0 to −3/market, with ~$35–45 of unrealized inventory swing per series at the tape's end. The margin the market's makers collect in the quiet 58% (+0.46¢) is not collected by a touch-joiner behind them.
+
+## 2026-09-24 — resting behind the touch: offset markouts, then the sim
+
+`offset_markouts.py` (new): for every touch trade, how far the print landed beyond the pre-trade
+touch on the maker's side, then the maker's markout. On the 09-20 exchange-wide tape (10 h,
+~6,000 markets) the gradient is monotonic: at touch +0.32¢, 0-1¢ +0.73, 1-2¢ +1.90, 2-5¢ +2.34,
+5¢+ **+5.32¢ at 300 s, 61% win, positive in 20 of 25 top series**. On KXBTC15M the same measure
+puts the 0-1¢ bucket worst on the book (−0.04¢, 43% win) — independently reproducing the sim's
+`offset_ticks=1` results (−0.45 to −2.45/market). Mean fill price is 43–52¢ in every bucket, so
+these are not tail options.
+
+Sim on KXNFLSPREAD (09-20, 284 markets, the series with the most deep volume). Capital turned
+out to dominate: at the original $500 shared across ~250 concurrent markets there were 4.7M
+`capital` vetoes. Sweeping it, the edge saturates at ~$10,000:
+
+| capital | offset 2 prorata | offset 2 pessimistic | offset 5 prorata | offset 5 pessimistic |
+|---|---|---|---|---|
+| $500 | +0.28 (1.94) | −0.11 (−0.84) | +0.16 (1.17) | +0.08 (0.65) |
+| $2,000 | +0.80 (2.67) | +0.35 (1.27) | +0.34 (1.13) | +0.26 (0.90) |
+| $10,000 | +0.94 (3.01) | +0.60 (2.16) | +0.46 (1.48) | +0.12 (0.41) |
+| unlimited | +0.92 (2.94) | +0.59 (2.14) | +0.44 (1.42) | +0.12 (0.42) |
+
+Offset 2 beats offset 5: deeper gives better edge per contract (+2.1–2.4¢ vs +0.85¢) and too few
+fills. Offset 5 is never significant under the pessimistic queue at any capital.
+
+`cluster_se.py` (new): 284 markets are strikes on ~15 games, so the market-level t is inflated.
+Clustering by game (CR1, and game-total t):
+
+| config | $/mkt | t naive | t clustered | t game | games + | ICC |
+|---|---|---|---|---|---|---|
+| touch joiner, $10k | −1.47 | −5.17 | −4.52 | −3.65 | 3/16 | 0.00 |
+| offset 2, prorata | +0.94 | +3.01 | +1.89 | +1.71 | **13/15** | 0.05 |
+| offset 2, pessimistic | +0.60 | +2.16 | +1.34 | +1.27 | **6/13** | 0.06 |
+| offset 5, pessimistic | +0.12 | +0.41 | +0.32 | +0.32 | 5/13 | 0.02 |
+
+ICC is 0.02–0.06, not the ~0.9 feared, so clustering deflates t by ~1.6x rather than destroying
+it — and the control's −4.52 shows the method still detects a real effect at this sample size.
+
+**Conclusion.** The touch-joiner negative reproduces and is robust (3/16 games positive). Resting
+behind the touch flips the sign and gives, for the first time, positive markouts on our own fills.
+But it is **not significant under the queue model our live polling supported**: offset 2
+pessimistic is t_game 1.27 and positive in only 6 of 13 games, versus 13 of 15 under prorata.
+The queue model, not the strategy, now decides this — and the 770 contracts/s pessimistic
+advancement was measured at the *touch* on KXBTC15M, not at a level 2 ticks deep in NFL spreads.
+Next measurement should be queue behaviour at depth (poll `queue_positions` on our own deep
+resting orders), not another day of tape.

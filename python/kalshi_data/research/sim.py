@@ -1452,6 +1452,52 @@ ETHSET = [
     Params("ETH depth >= 100, pessimistic queue", **_E, min_depth=100, queue="pessimistic"),
 ]
 
+# Resting far BEHIND the touch, filled only when a sweep runs through us ("catch the wick").
+# offset_markouts.py says the maker at 5c+ beyond the touch marks out +5.3c at 300 s on the
+# 09-20 exchange-wide tape, positive in 20 of 25 series. That measures whoever WAS resting
+# there; this set asks whether we can be, once queue position, collateral, repricing and
+# settlement are real. A deep quote must NOT chase the touch, hence the reprice hysteresis.
+_OFF = dict(stop_before_s=300, price_priority=True, engine_lag_ms=6.0, place_latency_ms=9, cancel_latency_ms=5,
+            size=20, max_pos=20, capital=500, global_capital=True, flatten_at_stop=True)
+OFFSET = [
+    Params("touch joiner (control)", **_OFF),
+    Params("offset 2 ticks", **_OFF, offset_ticks=2, reprice_ticks=2, min_rest_ms=5000),
+    Params("offset 3 ticks", **_OFF, offset_ticks=3, reprice_ticks=2, min_rest_ms=5000),
+    Params("offset 5 ticks", **_OFF, offset_ticks=5, reprice_ticks=2, min_rest_ms=5000),
+    Params("offset 8 ticks", **_OFF, offset_ticks=8, reprice_ticks=3, min_rest_ms=5000),
+    Params("offset 5, chases the touch (reprice 1)", **_OFF, offset_ticks=5, reprice_ticks=1),
+    Params("offset 5, never reprices (rest 60 s)", **_OFF, offset_ticks=5, reprice_ticks=4, min_rest_ms=60000),
+    Params("offset 5, pessimistic queue", **_OFF, offset_ticks=5, reprice_ticks=2, min_rest_ms=5000, queue="pessimistic"),
+    Params("offset 5, carry to settlement", **{**_OFF, "flatten_at_stop": False}, offset_ticks=5, reprice_ticks=2, min_rest_ms=5000),
+    Params("offset 5, size 50 / cap 50", **{**_OFF, "size": 50, "max_pos": 50}, offset_ticks=5, reprice_ticks=2, min_rest_ms=5000),
+    Params("offset 5, size 5 / cap 5", **{**_OFF, "size": 5, "max_pos": 5}, offset_ticks=5, reprice_ticks=2, min_rest_ms=5000),
+]
+
+# Is the offset edge starved or spurious? At capital=500 shared across ~250 concurrent
+# KXNFLSPREAD markets the OFFSET run logged 4.7M `capital` vetoes, so we were blocked from
+# quoting most of the time and the P&L may reflect selective presence rather than an edge.
+# Sweep the constraint; `capital=None` removes it entirely.
+_OF2 = dict(stop_before_s=300, price_priority=True, engine_lag_ms=6.0, place_latency_ms=9, cancel_latency_ms=5,
+            size=20, max_pos=20, global_capital=True, flatten_at_stop=True,
+            offset_ticks=5, reprice_ticks=2, min_rest_ms=5000)
+OFFSET2 = []
+for _cap in (500, 2000, 10000, None):
+    _tag = "unlimited" if _cap is None else f"${_cap}"
+    for _q in ("prorata", "pessimistic"):
+        OFFSET2.append(Params(f"offset 5, capital {_tag}, {_q}", **{**_OF2, "capital": _cap}, queue=_q))
+        OFFSET2.append(Params(f"offset 2, capital {_tag}, {_q}", **{**_OF2, "capital": _cap, "offset_ticks": 2}, queue=_q))
+
+# The configs worth clustered standard errors, at the capital level where the edge saturates.
+# Run with --per-market to dump per-market P&L for grouping by game (ticker segment 2).
+_OF3 = dict(stop_before_s=300, price_priority=True, engine_lag_ms=6.0, place_latency_ms=9, cancel_latency_ms=5,
+            size=20, max_pos=20, capital=10000, global_capital=True, flatten_at_stop=True)
+OFFSET3 = [
+    Params("touch joiner, capital $10k", **_OF3, queue="pessimistic"),
+    Params("offset 2, prorata", **_OF3, offset_ticks=2, reprice_ticks=2, min_rest_ms=5000, queue="prorata"),
+    Params("offset 2, pessimistic", **_OF3, offset_ticks=2, reprice_ticks=2, min_rest_ms=5000, queue="pessimistic"),
+    Params("offset 5, pessimistic", **_OF3, offset_ticks=5, reprice_ticks=2, min_rest_ms=5000, queue="pessimistic"),
+]
+
 # Non-crypto series from the exchange-wide survey: no spot signal, no strike, linear grid, many concurrent markets.
 _NC = dict(stop_before_s=300, price_priority=True, engine_lag_ms=6.0, place_latency_ms=9, cancel_latency_ms=5,
            size=20, max_pos=20, capital=500, global_capital=True, flatten_at_stop=True)
@@ -1476,6 +1522,21 @@ INPLAY = [
     Params("join only + pause 10 s", **_NC, no_improve=True, post_jump_pause_s=10),
     Params("pull > 2 ticks + pause 10 s", **_NC, wide_spread_ticks=2, wide_spread_pull=True, post_jump_pause_s=10),
     Params("pull > 2 ticks + pause 10 s, size 5", **{**_NC, "size": 5, "max_pos": 5}, wide_spread_ticks=2, wide_spread_pull=True, post_jump_pause_s=10),
+]
+
+# in-play inventory management on top of join-only + post-jump pause
+_IP = dict(_NC, no_improve=True, post_jump_pause_s=10)
+INPLAY_INV = [
+    Params("join only + pause 10 s (base, cap 20)", **_IP),
+    Params("base, cap 10", **{**_IP, "max_pos": 10}),
+    Params("base, cap 5 (size 5)", **{**_IP, "size": 5, "max_pos": 5}),
+    Params("base, cap 40 + size skew", **{**_IP, "max_pos": 40}, size_skew=True),
+    Params("base + lean reducing side 1 tick at 50% of cap", **_IP, skew_at=0.5),
+    Params("base + lean at 25% of cap", **_IP, skew_at=0.25),
+    Params("base + take to flatten above 10", **_IP, flatten_above=10),
+    Params("base + take to flatten above 5", **_IP, flatten_above=5),
+    Params("base, cap 40 skew + lean 50%", **{**_IP, "max_pos": 40}, size_skew=True, skew_at=0.5),
+    Params("base, no flatten at stop (carry)", **{**_IP, "flatten_at_stop": False}),
 ]
 
 # KXBTCD: hourly-settling strips of strikes, each alive ~25 h. Quote all strikes closing within max_ttx_h; capital shared.
@@ -1723,7 +1784,11 @@ def main() -> None:
     ap.add_argument("--eval3", action="store_true", help="depth-gate threshold sweep")
     ap.add_argument("--eval4", action="store_true", help="depth gate under the pessimistic (no advancement) queue")
     ap.add_argument("--baseline", action="store_true", help="the live/paper configuration only (for paper_vs_sim)")
+    ap.add_argument("--inplay-inv", action="store_true", help="in-play inventory management set")
     ap.add_argument("--inplay", action="store_true", help="in-play sports rule set")
+    ap.add_argument("--offset", action="store_true", help="rest behind the touch and be swept into (use --series <series>, --no-spot)")
+    ap.add_argument("--offset2", action="store_true", help="capital sweep for the offset set: is the edge starved or spurious?")
+    ap.add_argument("--offset3", action="store_true", help="the offset configs worth clustered SEs (use with --per-market)")
     ap.add_argument("--noncrypto", action="store_true", help="non-crypto configuration set (use --series <series>, --no-spot)")
     ap.add_argument("--fills-out", type=Path, default=None, help="write every fill of the FIRST config to this parquet")
     ap.add_argument("--warm-days", type=int, default=0, help="rebuild books from this many earlier days first (broad tape)")
@@ -1740,7 +1805,7 @@ def main() -> None:
     ap.add_argument("--sizes", action="store_true", help="depth 1000 size sweep under both queue models")
     ap.add_argument("--depth1000", action="store_true", help="the paper configuration from 2026-09-17 16:22 UTC: baseline + min depth 1000")
     a = ap.parse_args()
-    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else INPLAY if a.inplay else NONCRYPTO if a.noncrypto else HOURLY if a.hourly else OLD if a.old else DIAG if a.diag else (ETHSET if a.eth_part == 0 else ETHSET[:5] if a.eth_part == 1 else ETHSET[5:]) if a.eth else _veto_set(str(a.day), a.series) if a.veto else SIGIMP if a.sigimp else LATENCY2 if a.latency2 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
+    configs = SWEEP if a.sweep else INVENTORY if a.inventory else FILTERS if a.filters else FILTERS2 if a.filters2 else VALUE if a.value else VALUE_OOS if a.value_oos else PROBE if a.probe else JOIN if a.join else FAIR if a.fair else DFAIR if a.dfair else DFAIR2 if a.dfair2 else WALK if a.walk else MEASURED if a.measured else LATSWEEP if a.latsweep else AWSTAPE if a.awstape else FEEDS if a.feeds else FEEDS2 if a.feeds2 else CAPITAL if a.capital else INVENTORY2 if a.inventory2 else FLATTEN if a.flatten else FLAT if a.flat else CAPS if a.caps else SIZESKEW if a.sizeskew else QUEUE if a.queue else PRIORITY if a.priority else EVAL if a.eval else EVAL2 if a.eval2 else EVAL3 if a.eval3 else EVAL4 if a.eval4 else INPLAY_INV if a.inplay_inv else INPLAY if a.inplay else OFFSET3 if a.offset3 else OFFSET2 if a.offset2 else OFFSET if a.offset else NONCRYPTO if a.noncrypto else HOURLY if a.hourly else OLD if a.old else DIAG if a.diag else (ETHSET if a.eth_part == 0 else ETHSET[:5] if a.eth_part == 1 else ETHSET[5:]) if a.eth else _veto_set(str(a.day), a.series) if a.veto else SIGIMP if a.sigimp else LATENCY2 if a.latency2 else SIZES if a.sizes else EVAL[:1] if a.baseline else [Params("depth 1000 only", **_A3, min_depth=1000)] if a.depth1000 else PERMKT if a.per_market else CONFIGS
     if a.chunk:
         i, n = (int(x) for x in a.chunk.split("/"))
         per = -(-len(configs) // n)

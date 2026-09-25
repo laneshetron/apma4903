@@ -9,6 +9,7 @@ dependencies = [
     "orjson>=3.10",
     "duckdb>=1.0",
     "numpy>=2.5.3",
+    "zstandard>=0.25.0",
 ]
 
 [dependency-groups]
