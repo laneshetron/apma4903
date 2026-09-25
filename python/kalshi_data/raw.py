@@ -48,6 +48,25 @@ def raw_files(data_dir: Path, start: date, end: date | None = None) -> list[Path
     return out
 
 
+def frames(path: Path) -> list[tuple[int, int, int, int]]:
+    """Frame table from a .idx sidecar: (byte_offset, first_rx_ns, last_rx_ns, records).
+
+    Written by the Go recorder under CodecZstd. Each frame decompresses on its own
+    starting at byte_offset, so a caller wanting a time slice can skip the rest.
+    Returns [] when there is no index.
+    """
+    idx = path.with_suffix("").with_suffix(".idx") if path.name.endswith(".jsonl.zst") else None
+    if idx is None or not idx.exists():
+        return []
+    out = []
+    for line in idx.read_text().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        a, b, c, d = line.split(",")
+        out.append((int(a), int(b), int(c), int(d)))
+    return out
+
+
 def _open(path: Path):
     """Binary line-reader for a .gz or .zst tape file."""
     if path.suffix == ".zst":
@@ -61,14 +80,40 @@ def _open(path: Path):
     return gzip.open(path, "rb")
 
 
-def iter_file(path: Path) -> Iterator[Record]:
-    """Yield records from one file.
+def iter_file(path: Path, since_ns: int | None = None, until_ns: int | None = None) -> Iterator[Record]:
+    """Yield records from one file, optionally restricted to [since_ns, until_ns].
+
+    When the file has a frame index and a bound is given, frames that cannot
+    contain the range are skipped without being decompressed.
 
     Records are one JSON object per line. Files written before the recorder
     trimmed trailing newlines from exchange frames have the closing brace on
     the following line; those are joined transparently. A truncated final
     line (file still being written) is skipped.
     """
+    if (since_ns is not None or until_ns is not None) and (tab := frames(path)):
+        lo, hi = since_ns or -(1 << 62), until_ns or (1 << 62)
+        want = [(off, end) for (off, first, last, _), end in
+                zip(tab, [t[0] for t in tab[1:]] + [None]) if not (last < lo or first > hi)]
+        if not want:
+            return
+        import zstandard
+        dec = zstandard.ZstdDecompressor()
+        with path.open("rb") as fh:
+            for off, end in want:
+                fh.seek(off)
+                blob = fh.read(end - off) if end is not None else fh.read()
+                for line in dec.decompressobj().decompress(blob).split(b"\n"):
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = orjson.loads(line)
+                    except orjson.JSONDecodeError:
+                        continue
+                    if lo <= obj["rx_ns"] <= hi:
+                        yield Record(obj["rx_ns"], obj["raw"])
+        return
+
     with _open(path) as f:
         pending = b""
         for line in _lines_until_truncation(f):
@@ -87,9 +132,10 @@ def iter_file(path: Path) -> Iterator[Record]:
             yield Record(obj["rx_ns"], obj["raw"])
 
 
-def iter_records(data_dir: Path, start: date, end: date | None = None) -> Iterator[Record]:
+def iter_records(data_dir: Path, start: date, end: date | None = None,
+                 since_ns: int | None = None, until_ns: int | None = None) -> Iterator[Record]:
     for p in raw_files(data_dir, start, end):
-        yield from iter_file(p)
+        yield from iter_file(p, since_ns, until_ns)
 
 
 def _lines_until_truncation(f) -> Iterator[bytes]:

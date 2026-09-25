@@ -1,0 +1,22 @@
+[Unit]
+# Hyperliquid-only recorder for the high-volatility alts, kept separate from kalshi-spot so
+# that adding coins cannot destabilise the nine-venue BTC/ETH recorder (most venues do not
+# list these pairs). Feeds Test B: `python -m kalshi_data.research.hl_offset`.
+Description=Hyperliquid alt-coin market-data recorder (bbo + trades)
+After=network-online.target chronyd.service
+Wants=network-online.target
+
+[Service]
+User=kalshi
+WorkingDirectory=/opt/kalshi
+ExecStart=/opt/kalshi/bin/spot -data /opt/kalshi/data_hlalt -venues hyperliquid \
+  -assets ZEC,SOL,DOGE,XRP,SUI,AVAX,ENA,NEAR,ARB,kPEPE -status 127.0.0.1:8085
+Restart=always
+RestartSec=2
+Nice=5
+LimitNOFILE=65536
+StandardOutput=append:/opt/kalshi/logs/spot-hl.log
+StandardError=append:/opt/kalshi/logs/spot-hl.log
+
+[Install]
+WantedBy=multi-user.target
