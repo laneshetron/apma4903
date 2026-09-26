@@ -42,7 +42,8 @@ from ..raw import iter_records
 class Coin:
     __slots__ = ("mid", "book_bid", "book_ask", "book_rx", "bid_px", "ask_px", "bid_rx", "ask_rx",
                  "pos", "open_lots", "realized", "fees", "n_fills", "filled_notional",
-                 "peak_abs_pos", "pos_notional", "edge_bp_sum", "edge_w")
+                 "peak_abs_pos", "pos_notional", "edge_bp_sum", "edge_w", "bid_orders", "ask_orders",
+                 "stale_fills", "stale_notional")
 
     def __init__(self) -> None:
         self.mid = None
@@ -61,6 +62,10 @@ class Coin:
         self.peak_abs_pos = 0.0
         self.edge_bp_sum = 0.0
         self.edge_w = 0.0
+        self.bid_orders: list = []   # (px, live_from, dead_after) dead_after None = still working
+        self.ask_orders: list = []
+        self.stale_fills = 0
+        self.stale_notional = 0.0
 
 
 def depth_at(levels: list[tuple[float, float]], px: float, side: str) -> float:
@@ -84,6 +89,11 @@ def main() -> None:
     ap.add_argument("--hold-s", type=float, default=300)
     ap.add_argument("--tol", type=float, default=0.30, help="reprice when offset drifts this fraction")
     ap.add_argument("--queue", choices=("pessimistic", "prorata", "none"), default="pessimistic")
+    ap.add_argument("--place-ms", type=float, default=0.0,
+                    help="delay from seeing a bbo update to our new order being live at the engine")
+    ap.add_argument("--cancel-ms", type=float, default=0.0,
+                    help="delay from deciding to reprice to the OLD order actually being gone; "
+                         "until then the stale price is still fillable, which is where latency costs us")
     ap.add_argument("--fee-bp", type=float, default=1.5)
     ap.add_argument("--exit-bp", type=float, default=0.0, help="cost charged per exit, bps")
     ap.add_argument("--out", type=Path, default=None)
@@ -103,12 +113,21 @@ def main() -> None:
             tgt = tgt_bid if side == "bid" else tgt_ask
             blocked = (c.pos_notional >= a.max_pos) if side == "bid" else (c.pos_notional <= -a.max_pos)
             if blocked:
+                orders = c.bid_orders if side == "bid" else c.ask_orders
+                for i, (opx, lf, da) in enumerate(orders):
+                    if da is None:
+                        orders[i] = (opx, lf, rx + int(a.cancel_ms * 1e6))
                 if side == "bid":
                     c.bid_px = None
                 else:
                     c.ask_px = None
                 continue
             if px is None or abs(px - tgt) / tgt > a.offset_bp / 1e4 * a.tol:
+                orders = c.bid_orders if side == "bid" else c.ask_orders
+                for i, (opx, lf, da) in enumerate(orders):
+                    if da is None:
+                        orders[i] = (opx, lf, rx + int(a.cancel_ms * 1e6))
+                orders.append((tgt, rx + int(a.place_ms * 1e6), None))
                 if side == "bid":
                     c.bid_px, c.bid_rx = tgt, rx
                 else:
@@ -169,9 +188,15 @@ def main() -> None:
                 continue
             close_expired(c, rx)
             # side B = taker buying, walking UP through asks -> hits OUR ask
-            our_px = c.ask_px if side == "B" else c.bid_px
-            if our_px is None:
+            orders = c.ask_orders if side == "B" else c.bid_orders
+            orders[:] = [o for o in orders if o[2] is None or o[2] > rx]
+            live = [o for o in orders if o[1] <= rx]
+            if not live:
                 continue
+            # a sweep takes the most aggressive resting price first
+            live.sort(key=lambda o: o[0], reverse=(side != "B"))
+            our_px = live[0][0]
+            is_stale = live[0][2] is not None      # a quote we have already asked to cancel
             deepest = max(p for p, _ in prints) if side == "B" else min(p for p, _ in prints)
             reached = (deepest >= our_px) if side == "B" else (deepest <= our_px)
             if not reached:
@@ -198,6 +223,10 @@ def main() -> None:
             c.open_lots.append((rx + hold_ns, units, our_px))
             c.edge_bp_sum += sign * (c.mid - our_px) / c.mid * 1e4 * fill_notional
             c.edge_w += fill_notional
+            if is_stale:
+                c.stale_fills += 1
+                c.stale_notional += fill_notional
+            orders.remove(live[0])
             if side == "B":
                 c.ask_px = None
             else:
@@ -209,7 +238,8 @@ def main() -> None:
 
     lines = [f"# Hyperliquid paper trader, {a.day}{'' if not a.end else '..' + str(a.end)}\n",
              f"Resting +/-{a.offset_bp:.0f} bp, ${a.size:,.0f} per side per coin, ${a.max_pos:,.0f} inventory cap, "
-             f"{a.hold_s:.0f} s hold, {a.queue} queue, {a.fee_bp} bp maker fee.\n",
+             f"{a.hold_s:.0f} s hold, {a.queue} queue, {a.fee_bp} bp maker fee, "
+             f"place {a.place_ms:.0f} ms / cancel {a.cancel_ms:.0f} ms latency.\n",
              "| coin | fills | filled $ | edge at fill bp | fees $ | **net $** | peak inv $ | $/day per $1k rested |",
              "|---|---|---|---|---|---|---|---|"]
     tot_net = tot_fill = tot_fee = tot_peak = 0.0
@@ -231,7 +261,10 @@ def main() -> None:
     lines.append(f"\n**total: {tot_n:,} fills, ${tot_fill:,.0f} filled, ${tot_fee:,.0f} fees, "
                  f"net ${tot_net:+,.0f}, peak inventory ${tot_peak:,.0f}**")
     if tot_fill:
+        sf = sum(c.stale_fills for c in C.values()); sn = sum(c.stale_notional for c in C.values())
         lines.append(f"\nnet edge realised: {tot_net / tot_fill * 1e4:+.2f} bp of filled notional")
+        lines.append(f"fills on a quote we had already asked to cancel: {sf:,} "
+                     f"({sn / tot_fill * 100:.0f}% of filled notional)")
     text = "\n".join(lines)
     print(text)
     if a.out:
