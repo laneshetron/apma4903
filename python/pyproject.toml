@@ -14,8 +14,10 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "hyperliquid-python-sdk>=0.24.0",
     "pytest>=8",
     "scikit-learn>=1.9.1",
+    "websockets>=17.1",
 ]
 
 [build-system]
