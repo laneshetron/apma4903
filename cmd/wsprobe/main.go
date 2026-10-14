@@ -4,7 +4,7 @@
 // each delta arrives compared with any single connection.
 //
 //	wsprobe -config config.yaml -n 3 -dur 3m
-//	wsprobe -config config.yaml -ips 18.226.50.229,3.15.111.226,18.217.10.53 -dur 3m
+//	wsprobe -config config.yaml -ips <exchange edge ips, comma separated> -dur 3m
 package main
 
 import (

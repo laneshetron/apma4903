@@ -27,7 +27,7 @@ Reading the matrix:
 4. Deploy the collector, spot recorder and later the quoter in the winning AZ;
    keep the instance's IP list for `--resolve`-style pinning.
 
-## Recorder host (use2-az3, i-06df29ae29b6f2bcf, 3.21.102.44)
+## Recorder host (use2-az3; instance id and IP are local to the operator)
 
 Layout on the host: `/opt/kalshi/{bin,data,logs,config.yaml,.env,kalshi-api.pem}`,
 owned by the `kalshi` system user; units in `deploy/systemd/` run as that user
@@ -38,7 +38,7 @@ and restart on failure. Root volume grown to 100 GB (~1 month of raw data).
 - Status: `curl 127.0.0.1:8080/status` (collector), `:8081/status` (spot); logs in `/opt/kalshi/logs/`
 - Pull data: `deploy/sync.sh` -> `./data_aws/`; analysis tools take `--data-dir ../data_aws`
 
-## Quoter host (use2-az2, c7g.medium arm64, i-015eab555615848a2, 18.116.32.119)
+## Quoter host (use2-az2, c7g.medium arm64; instance id and IP are local to the operator)
 
 Runs `kalshi-quoter-paper` (and `kalshi-quoter-live` when enabled) only; the recorders stay on the t3.micro.
 Build with `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o build/arm64/quoter ./cmd/quoter`.
