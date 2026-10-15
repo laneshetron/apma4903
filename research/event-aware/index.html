@@ -1,0 +1,1204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Timing-Aware Prediction Market Maker</title>
+  <meta name="description" content="Interactive simulation comparing a diffusion-only prediction-market market maker with a timing-aware jump-risk controller." />
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --card: #fbfbfc;
+      --text: #16181d;
+      --muted: #667085;
+      --border: #d9dde6;
+      --accent: #2563eb;
+      --accent-soft: #dbeafe;
+      --series-original: #7c3aed;
+      --series-aware: #059669;
+      --series-hazard: #f59e0b;
+      --series-event: #dc2626;
+      --grid: #e7e9ef;
+      --shadow: 0 10px 25px rgba(16,24,40,.06);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1115;
+        --panel: #151820;
+        --card: #11141b;
+        --text: #f4f6fb;
+        --muted: #9aa4b2;
+        --border: #2a3040;
+        --accent: #60a5fa;
+        --accent-soft: #172554;
+        --series-original: #a78bfa;
+        --series-aware: #34d399;
+        --series-hazard: #fbbf24;
+        --series-event: #fb7185;
+        --grid: #272c38;
+        --shadow: none;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+
+    .wrap {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 48px;
+    }
+
+    header {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(1.8rem, 3vw, 2.7rem);
+      letter-spacing: -0.035em;
+    }
+
+    .lede {
+      margin: 0;
+      max-width: 900px;
+      color: var(--muted);
+      font-size: 1.02rem;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+    }
+
+    .intro {
+      padding: 16px 18px;
+      margin-bottom: 16px;
+    }
+
+    .controls {
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    .controls-grid {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    @media (max-width: 900px) {
+      .controls-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 560px) {
+      .controls-grid { grid-template-columns: 1fr; }
+    }
+
+    label {
+      display: grid;
+      gap: 8px;
+      font-weight: 650;
+      font-size: .92rem;
+    }
+
+    .control-line {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    input[type="range"] { width: 100%; }
+    output {
+      width: 58px;
+      text-align: right;
+      font: 600 .88rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--muted);
+    }
+
+    input[type="number"] {
+      width: 100%;
+      min-height: 44px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      background: var(--card);
+      font-size: 1rem;
+    }
+
+    button {
+      min-height: 44px;
+      border: none;
+      border-radius: 10px;
+      padding: 10px 16px;
+      background: var(--accent);
+      color: white;
+      font-weight: 700;
+      font-size: .95rem;
+      cursor: pointer;
+    }
+
+    button:disabled { opacity: .55; cursor: wait; }
+
+    .button-cell {
+      display: flex;
+      align-items: end;
+    }
+
+    .button-cell button { width: 100%; }
+
+    #status {
+      margin: 0 2px 16px;
+      color: var(--muted);
+      font-size: .92rem;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    @media (max-width: 980px) {
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 520px) {
+      .stats { grid-template-columns: 1fr; }
+    }
+
+    .stat {
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--card);
+    }
+
+    .stat-label {
+      color: var(--muted);
+      font-size: .78rem;
+      margin-bottom: 6px;
+    }
+
+    .stat-value {
+      font-weight: 750;
+      font-size: .96rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .orig { color: var(--series-original); }
+    .aware { color: var(--series-aware); }
+
+    .chart-section {
+      margin-bottom: 16px;
+    }
+
+    .chart-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin: 0 2px 8px;
+    }
+
+    .chart-head strong { font-size: .95rem; }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      color: var(--muted);
+      font-size: .78rem;
+    }
+
+    .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 18px; height: 3px; border-radius: 999px; display: inline-block; }
+    .hazard-swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; opacity: .35; }
+
+    .chart-card {
+      padding: 10px;
+      overflow: hidden;
+    }
+
+    svg {
+      width: 100%;
+      display: block;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    @media (max-width: 860px) {
+      .two-col { grid-template-columns: 1fr; }
+    }
+
+    .inspect {
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    .snapshot {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    @media (max-width: 980px) {
+      .snapshot { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 560px) {
+      .snapshot { grid-template-columns: 1fr; }
+    }
+
+    .snap-card {
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--card);
+      font-size: .9rem;
+    }
+
+    .snap-label {
+      color: var(--muted);
+      font-size: .76rem;
+      margin-bottom: 5px;
+    }
+
+    details {
+      padding: 15px 17px;
+      margin-top: 8px;
+    }
+
+    summary {
+      cursor: pointer;
+      font-weight: 750;
+    }
+
+    details p {
+      color: var(--muted);
+      font-size: .92rem;
+      margin: 10px 0 0;
+    }
+
+    code, .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .92em;
+    }
+
+    footer {
+      margin-top: 20px;
+      color: var(--muted);
+      font-size: .8rem;
+      text-align: center;
+    }
+
+    .note {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: .82rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>Timing-Aware Prediction Market Maker</h1>
+      <p class="lede">
+        A same-path simulation comparing a diffusion-only market maker with a timing-aware controller that anticipates one-shot scheduled information, unscheduled jumps, and stale-quote adverse selection.
+      </p>
+    </header>
+
+    <section class="panel intro">
+      <p style="margin:0">
+        The <strong class="orig">original</strong> controller assumes diffusion-only risk. The
+        <strong class="aware">timing-aware</strong> controller knows the scheduled-event hazard curve,
+        accounts for unscheduled jumps, and changes policy after the anticipated information event actually occurs.
+      </p>
+    </section>
+
+    <form id="controls" class="panel controls">
+      <div class="controls-grid">
+        <label>
+          Expected event time τ
+          <div class="control-line">
+            <input id="tau" type="range" min="0.20" max="0.85" step="0.05" value="0.65" />
+            <output id="tauOut">65%</output>
+          </div>
+        </label>
+
+        <label>
+          Timing uncertainty
+          <div class="control-line">
+            <input id="width" type="range" min="0.025" max="0.20" step="0.025" value="0.075" />
+            <output id="widthOut">7.5%</output>
+          </div>
+        </label>
+
+        <label>
+          Scheduled jump size ρₛ
+          <div class="control-line">
+            <input id="rhoS" type="range" min="0.10" max="0.80" step="0.05" value="0.50" />
+            <output id="rhoSOut">0.50</output>
+          </div>
+        </label>
+
+        <label>
+          Unscheduled intensity λᵤ
+          <div class="control-line">
+            <input id="lambdaU" type="range" min="0" max="2" step="0.1" value="0.3" />
+            <output id="lambdaUOut">0.3</output>
+          </div>
+        </label>
+
+        <label>
+          Unscheduled jump size ρᵤ
+          <div class="control-line">
+            <input id="rhoU" type="range" min="0" max="0.60" step="0.05" value="0.25" />
+            <output id="rhoUOut">0.25</output>
+          </div>
+        </label>
+
+        <label>
+          Starting inventory
+          <div class="control-line">
+            <input id="q0" type="range" min="-6" max="6" step="1" value="3" />
+            <output id="q0Out">3</output>
+          </div>
+        </label>
+
+        <label>
+          Random seed
+          <input id="seed" type="number" min="1" max="999999" step="1" value="2718" />
+        </label>
+
+        <div class="button-cell">
+          <button id="solve" type="submit">Solve &amp; simulate</button>
+        </div>
+      </div>
+    </form>
+
+    <div id="status" aria-live="polite">Solving the Bellman system…</div>
+
+    <section class="stats" aria-live="polite">
+      <div class="stat">
+        <div class="stat-label">Scheduled event realized</div>
+        <div id="eventTime" class="stat-value">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Final marked P&amp;L</div>
+        <div id="finalPnl" class="stat-value">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Stale-quote loss</div>
+        <div id="pickoffLoss" class="stat-value">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Average pre-event spread</div>
+        <div id="preSpread" class="stat-value">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Maximum |inventory|</div>
+        <div id="maxInv" class="stat-value">—</div>
+      </div>
+    </section>
+
+    <section class="chart-section">
+      <div class="chart-head">
+        <strong>Fair probability, quotes, and anticipated event window</strong>
+        <div class="legend">
+          <span class="legend-item"><i class="swatch" style="background:var(--text)"></i>Fair probability</span>
+          <span class="legend-item"><i class="swatch" style="background:var(--series-original)"></i>Original quotes</span>
+          <span class="legend-item"><i class="swatch" style="background:var(--series-aware)"></i>Timing-aware quotes</span>
+          <span class="legend-item"><i class="hazard-swatch" style="background:var(--series-hazard)"></i>Event hazard</span>
+        </div>
+      </div>
+      <div class="panel chart-card">
+        <svg id="priceChart" viewBox="0 0 760 280" role="img" aria-label="Probability and quotes over time"></svg>
+      </div>
+    </section>
+
+    <section class="two-col">
+      <div>
+        <div class="chart-head"><strong>Inventory</strong></div>
+        <div class="panel chart-card">
+          <svg id="inventoryChart" viewBox="0 0 720 220" role="img" aria-label="Inventory comparison"></svg>
+        </div>
+      </div>
+
+      <div>
+        <div class="chart-head"><strong>Marked-to-market P&amp;L</strong></div>
+        <div class="panel chart-card">
+          <svg id="pnlChart" viewBox="0 0 720 220" role="img" aria-label="Profit and loss comparison"></svg>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel inspect">
+      <label>
+        Inspect time <span id="cursorLabel" class="mono" style="color:var(--muted)">50%</span>
+        <input id="cursor" type="range" min="0" max="63" step="1" value="32" />
+      </label>
+      <div id="snapshot" class="snapshot"></div>
+    </section>
+
+    <details class="panel">
+      <summary>What this solver is doing</summary>
+      <p>
+        The state grid is <code>(t,p,q,S)</code>, where <code>S=0</code> means the anticipated event has not yet occurred and <code>S=1</code> means it has.
+        The solver works backward over 64 time steps, 25 probability states, and 17 inventory states.
+      </p>
+      <p>
+        At each state the market maker chooses bid and ask offsets from a discrete action grid. Ordinary fills arrive with exponentially declining intensity as quotes move away from fair value.
+        The timing-aware Bellman recursion additionally integrates a one-shot scheduled-event hazard, unscheduled jumps, quadratic inventory risk from jump variance, and stale-quote execution whenever the post-news fair value crosses a resting quote.
+      </p>
+      <p>
+        Both policies are then evaluated on the same realized probability path and common random order-flow draws. The original controller re-optimizes after a jump but does not anticipate jumps before they occur.
+      </p>
+      <p>
+        This is a finite-state numerical approximation to the proposed HJB/PIDE system, not a convergence-tested production implementation.
+      </p>
+    </details>
+
+    <p class="note">
+      Suggested next extension: add a matched-total-variance diffusion controller to isolate the value of discontinuity and timing information from variance alone.
+    </p>
+
+    <footer>Standalone research prototype · no backend or external dependencies</footer>
+  </main>
+
+  <script>
+    (() => {
+      const $ = (s) => document.querySelector(s);
+      const N = 64, P = 25, QN = 17, qMin = -8, qMax = 8, dt = 1 / N;
+      const pMin = 0.05, pMax = 0.95, pStep = (pMax - pMin) / (P - 1);
+      const pGrid = Array.from({ length: P }, (_, i) => pMin + i * pStep);
+      const offsets = [0.015, 0.03, 0.055, 0.09, 0.14];
+      const actions = [];
+      for (const db of offsets) for (const da of offsets) actions.push({ db, da });
+
+      const sigma = 0.82, gamma = 0.04, gammaT = 0.01, fillA = 22, fillK = 34;
+      let solved = null, sim = null, hazard = [];
+
+      const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+      const pq = (pi, qi) => pi * QN + qi;
+      const qToI = (q) => clamp(Math.round(q - qMin), 0, QN - 1);
+      const iToQ = (qi) => qMin + qi;
+      const nearestP = (p) => clamp(Math.round((p - pMin) / pStep), 0, P - 1);
+
+      const mulberry32 = (a) => () => {
+        let t = a += 0x6D2B79F5;
+        t = Math.imul(t ^ t >>> 15, t | 1);
+        t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+
+      function normal(rng) {
+        let u = 0, v = 0;
+        while (u === 0) u = rng();
+        while (v === 0) v = rng();
+        return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+      }
+
+      const cents = (x) => (x * 100).toFixed(2) + "¢";
+      const pnlFmt = (x) => (x >= 0 ? "+" : "") + (x * 100).toFixed(2) + "¢";
+
+      function buildHazard(tau, width) {
+        const w = [], mass = 0.997;
+        let sum = 0;
+        for (let i = 0; i < N; i++) {
+          const t = (i + 0.5) / N;
+          const z = (t - tau) / Math.max(width, 0.01);
+          const x = Math.exp(-0.5 * z * z);
+          w.push(x);
+          sum += x;
+        }
+
+        const pmf = w.map((x) => mass * x / sum);
+        const h = [];
+        let surv = 1;
+
+        for (let i = 0; i < N; i++) {
+          const hi = surv > 1e-9 ? clamp(pmf[i] / surv, 0, 0.985) : 0;
+          h.push(hi);
+          surv *= 1 - hi;
+        }
+        return h;
+      }
+
+      function diffExpected(V, pi, qi) {
+        const p = pGrid[pi], q = iToQ(qi);
+        const variance = sigma * sigma * p * p * (1 - p) * (1 - p) * dt;
+        const move = clamp(variance / (2 * pStep * pStep), 0, 0.45);
+        const lo = clamp(pi - 1, 0, P - 1), hi = clamp(pi + 1, 0, P - 1);
+
+        return (
+          -gamma * q * q * variance +
+          move * V[pq(lo, qi)] +
+          (1 - 2 * move) * V[pq(pi, qi)] +
+          move * V[pq(hi, qi)]
+        );
+      }
+
+      function eventExpected(V, p, qi, bid, ask, rho) {
+        const q = iToQ(qi);
+        const outcomes = [
+          { pp: p + rho * (1 - p), pr: p },
+          { pp: (1 - rho) * p, pr: 1 - p }
+        ];
+
+        let total = 0;
+
+        for (const o of outcomes) {
+          const pp = clamp(o.pp, pMin, pMax);
+          let q2 = q, reward = 0;
+
+          if (pp > ask) {
+            q2 -= 1;
+            reward += ask - pp;
+          }
+
+          if (pp < bid) {
+            q2 += 1;
+            reward += pp - bid;
+          }
+
+          q2 = clamp(q2, qMin, qMax);
+
+          const risk = gamma * q * q * (pp - p) * (pp - p);
+          total += o.pr * (reward - risk + V[pq(nearestP(pp), qToI(q2))]);
+        }
+
+        return total;
+      }
+
+      function fillMix(action, p, q, transition) {
+        const bid = clamp(p - action.db, 0.001, 0.999);
+        const ask = clamp(p + action.da, 0.001, 0.999);
+
+        let pb = q >= qMax ? 0 : 1 - Math.exp(-fillA * Math.exp(-fillK * (p - bid)) * dt);
+        let pa = q <= qMin ? 0 : 1 - Math.exp(-fillA * Math.exp(-fillK * (ask - p)) * dt);
+
+        const s = pb + pa;
+        if (s > 0.78) {
+          const m = 0.78 / s;
+          pb *= m;
+          pa *= m;
+        }
+
+        const pn = 1 - pb - pa;
+        const qi = qToI(q);
+
+        const v0 = transition(qi, bid, ask);
+        const vb = q < qMax ? action.db + transition(qToI(q + 1), bid, ask) : v0;
+        const va = q > qMin ? action.da + transition(qToI(q - 1), bid, ask) : v0;
+
+        return pn * v0 + pb * vb + pa * va;
+      }
+
+      function terminal() {
+        const V = new Float64Array(P * QN);
+
+        for (let pi = 0; pi < P; pi++) {
+          for (let qi = 0; qi < QN; qi++) {
+            const p = pGrid[pi], q = iToQ(qi);
+            V[pq(pi, qi)] = -gammaT * q * q * p * (1 - p);
+          }
+        }
+
+        return V;
+      }
+
+      function solvePolicies(params) {
+        hazard = buildHazard(params.tau, params.width);
+
+        let VOrigNext = terminal();
+        let VPostNext = terminal();
+        let VPreNext = terminal();
+
+        const origPolicy = new Uint8Array(N * P * QN);
+        const postPolicy = new Uint8Array(N * P * QN);
+        const prePolicy = new Uint8Array(N * P * QN);
+
+        const pu = 1 - Math.exp(-params.lambdaU * dt);
+
+        for (let ti = N - 1; ti >= 0; ti--) {
+          const VOrig = new Float64Array(P * QN);
+          const VPost = new Float64Array(P * QN);
+          const VPre = new Float64Array(P * QN);
+          const hs = hazard[ti];
+
+          for (let pi = 0; pi < P; pi++) {
+            const p = pGrid[pi];
+
+            for (let qi = 0; qi < QN; qi++) {
+              const q = iToQ(qi);
+
+              let bestO = -1e99, bestP = -1e99, bestR = -1e99;
+              let ao = 0, ap = 0, ar = 0;
+
+              for (let ai = 0; ai < actions.length; ai++) {
+                const act = actions[ai];
+
+                const vo = fillMix(
+                  act,
+                  p,
+                  q,
+                  (qj) => diffExpected(VOrigNext, pi, qj)
+                );
+
+                if (vo > bestO) {
+                  bestO = vo;
+                  ao = ai;
+                }
+
+                const vp = fillMix(
+                  act,
+                  p,
+                  q,
+                  (qj, bid, ask) => {
+                    const d = diffExpected(VPostNext, pi, qj);
+                    const e = eventExpected(VPostNext, p, qj, bid, ask, params.rhoU);
+                    return (1 - pu) * d + pu * e;
+                  }
+                );
+
+                if (vp > bestP) {
+                  bestP = vp;
+                  ap = ai;
+                }
+
+                const vr = fillMix(
+                  act,
+                  p,
+                  q,
+                  (qj, bid, ask) => {
+                    const d = diffExpected(VPreNext, pi, qj);
+                    const eu = eventExpected(VPreNext, p, qj, bid, ask, params.rhoU);
+                    const es = eventExpected(VPostNext, p, qj, bid, ask, params.rhoS);
+
+                    return hs * es + (1 - hs) * ((1 - pu) * d + pu * eu);
+                  }
+                );
+
+                if (vr > bestR) {
+                  bestR = vr;
+                  ar = ai;
+                }
+              }
+
+              const ix = pq(pi, qi);
+              VOrig[ix] = bestO;
+              VPost[ix] = bestP;
+              VPre[ix] = bestR;
+
+              const pix = ti * P * QN + ix;
+              origPolicy[pix] = ao;
+              postPolicy[pix] = ap;
+              prePolicy[pix] = ar;
+            }
+          }
+
+          VOrigNext = VOrig;
+          VPostNext = VPost;
+          VPreNext = VPre;
+        }
+
+        return { origPolicy, postPolicy, prePolicy };
+      }
+
+      function policyAction(policy, ti, p, q) {
+        const pi = nearestP(p), qi = qToI(q);
+        return actions[policy[ti * P * QN + pq(pi, qi)]];
+      }
+
+      function simulate(params, pol) {
+        const rng = mulberry32(params.seed >>> 0);
+        const pu = 1 - Math.exp(-params.lambdaU * dt);
+
+        const makers = {
+          orig: {
+            q: params.q0,
+            cash: -params.q0 * 0.5,
+            spreadPnL: 0,
+            pickoff: 0
+          },
+          aware: {
+            q: params.q0,
+            cash: -params.q0 * 0.5,
+            spreadPnL: 0,
+            pickoff: 0
+          }
+        };
+
+        const out = {
+          p: [],
+          hazard: [...hazard],
+          eventIndex: null,
+          eventKind: [],
+          orig: { bid: [], ask: [], q: [], pnl: [], spread: [] },
+          aware: { bid: [], ask: [], q: [], pnl: [], spread: [] }
+        };
+
+        let p = 0.5;
+        let scheduledDone = false;
+
+        for (let ti = 0; ti < N; ti++) {
+          out.p.push(p);
+
+          const aO = policyAction(pol.origPolicy, ti, p, makers.orig.q);
+          const aA = policyAction(
+            scheduledDone ? pol.postPolicy : pol.prePolicy,
+            ti,
+            p,
+            makers.aware.q
+          );
+
+          const quotes = {
+            orig: {
+              bid: clamp(p - aO.db, 0.001, 0.999),
+              ask: clamp(p + aO.da, 0.001, 0.999)
+            },
+            aware: {
+              bid: clamp(p - aA.db, 0.001, 0.999),
+              ask: clamp(p + aA.da, 0.001, 0.999)
+            }
+          };
+
+          for (const key of ["orig", "aware"]) {
+            out[key].bid.push(quotes[key].bid);
+            out[key].ask.push(quotes[key].ask);
+            out[key].spread.push(quotes[key].ask - quotes[key].bid);
+          }
+
+          const ub = rng(), ua = rng();
+
+          for (const key of ["orig", "aware"]) {
+            const m = makers[key], qq = quotes[key];
+
+            let pb = m.q >= qMax
+              ? 0
+              : 1 - Math.exp(-fillA * Math.exp(-fillK * (p - qq.bid)) * dt);
+
+            let pa = m.q <= qMin
+              ? 0
+              : 1 - Math.exp(-fillA * Math.exp(-fillK * (qq.ask - p)) * dt);
+
+            const s = pb + pa;
+
+            if (s > 0.78) {
+              const mm = 0.78 / s;
+              pb *= mm;
+              pa *= mm;
+            }
+
+            if (ub < pb) {
+              m.q += 1;
+              m.cash -= qq.bid;
+              m.spreadPnL += p - qq.bid;
+            } else if (ua < pa) {
+              m.q -= 1;
+              m.cash += qq.ask;
+              m.spreadPnL += qq.ask - p;
+            }
+          }
+
+          let p2 = p, kind = "diffusion";
+
+          if (!scheduledDone && rng() < hazard[ti]) {
+            scheduledDone = true;
+            out.eventIndex = ti;
+            kind = "scheduled";
+
+            p2 = rng() < p
+              ? p + params.rhoS * (1 - p)
+              : (1 - params.rhoS) * p;
+          } else if (rng() < pu) {
+            kind = "unscheduled";
+
+            p2 = rng() < p
+              ? p + params.rhoU * (1 - p)
+              : (1 - params.rhoU) * p;
+          } else {
+            p2 = p + sigma * p * (1 - p) * Math.sqrt(dt) * normal(rng);
+          }
+
+          p2 = clamp(p2, pMin, pMax);
+          out.eventKind.push(kind);
+
+          if (kind !== "diffusion") {
+            for (const key of ["orig", "aware"]) {
+              const m = makers[key], qq = quotes[key];
+
+              if (p2 > qq.ask && m.q > qMin) {
+                m.q -= 1;
+                m.cash += qq.ask;
+                m.pickoff += p2 - qq.ask;
+              }
+
+              if (p2 < qq.bid && m.q < qMax) {
+                m.q += 1;
+                m.cash -= qq.bid;
+                m.pickoff += qq.bid - p2;
+              }
+            }
+          }
+
+          p = p2;
+
+          for (const key of ["orig", "aware"]) {
+            out[key].q.push(makers[key].q);
+            out[key].pnl.push(makers[key].cash + makers[key].q * p);
+          }
+        }
+
+        out.p.push(p);
+        out.makers = makers;
+        return out;
+      }
+
+      function svgEl(name, attrs = {}) {
+        const e = document.createElementNS("http://www.w3.org/2000/svg", name);
+        for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+        return e;
+      }
+
+      function draw(svg, series, opts = {}) {
+        svg.innerHTML = "";
+
+        const box = svg.getAttribute("viewBox").split(" ").map(Number);
+        const W = box[2], H = box[3];
+        const L = 48, R = 14, T = 14, B = 30;
+        const pW = W - L - R, pH = H - T - B;
+
+        let vals = [];
+        series.forEach((s) => vals.push(...s.data.filter(Number.isFinite)));
+
+        let ymin = opts.ymin ?? Math.min(...vals);
+        let ymax = opts.ymax ?? Math.max(...vals);
+
+        if (ymin === ymax) {
+          ymin -= 1;
+          ymax += 1;
+        }
+
+        if (opts.ymin == null) {
+          const d = (ymax - ymin) * 0.08;
+          ymin -= d;
+        }
+
+        if (opts.ymax == null) {
+          const d = (ymax - ymin) * 0.08;
+          ymax += d;
+        }
+
+        const x = (i) => L + (i / (N - 1)) * pW;
+        const y = (v) => T + (ymax - v) / (ymax - ymin) * pH;
+
+        if (opts.hazard) {
+          const maxH = Math.max(...opts.hazard, 1e-9);
+
+          for (let i = 0; i < N; i++) {
+            const op = 0.04 + 0.26 * (opts.hazard[i] / maxH);
+
+            svg.appendChild(svgEl("rect", {
+              x: x(i),
+              y: T,
+              width: Math.max(1, pW / (N - 1) + 0.5),
+              height: pH,
+              fill: getComputedStyle(document.documentElement).getPropertyValue("--series-hazard").trim(),
+              opacity: op
+            }));
+          }
+        }
+
+        for (let g = 0; g <= 4; g++) {
+          const gy = T + g * pH / 4;
+
+          svg.appendChild(svgEl("line", {
+            x1: L, y1: gy, x2: W - R, y2: gy,
+            stroke: getComputedStyle(document.documentElement).getPropertyValue("--grid").trim(),
+            "stroke-width": 1
+          }));
+
+          const tv = ymax - g * (ymax - ymin) / 4;
+          const tx = svgEl("text", {
+            x: L - 8,
+            y: gy + 4,
+            "text-anchor": "end",
+            "font-size": 11,
+            fill: getComputedStyle(document.documentElement).getPropertyValue("--muted").trim()
+          });
+
+          tx.textContent = opts.formatY ? opts.formatY(tv) : tv.toFixed(2);
+          svg.appendChild(tx);
+        }
+
+        [0, 0.25, 0.5, 0.75, 1].forEach((t) => {
+          const xx = L + t * pW;
+          const tx = svgEl("text", {
+            x: xx,
+            y: H - 8,
+            "text-anchor": "middle",
+            "font-size": 11,
+            fill: getComputedStyle(document.documentElement).getPropertyValue("--muted").trim()
+          });
+
+          tx.textContent = Math.round(t * 100) + "%";
+          svg.appendChild(tx);
+        });
+
+        series.forEach((s) => {
+          let d = "";
+
+          s.data.forEach((v, i) => {
+            if (i >= N) return;
+            d += (i ? "L" : "M") + x(i).toFixed(2) + " " + y(v).toFixed(2) + " ";
+          });
+
+          svg.appendChild(svgEl("path", {
+            d,
+            fill: "none",
+            stroke: s.color,
+            "stroke-width": s.width || 2,
+            "stroke-opacity": s.opacity ?? 1,
+            "stroke-dasharray": s.dash || ""
+          }));
+        });
+
+        if (opts.eventIndex != null) {
+          const xx = x(opts.eventIndex);
+
+          svg.appendChild(svgEl("line", {
+            x1: xx, y1: T, x2: xx, y2: H - B,
+            stroke: getComputedStyle(document.documentElement).getPropertyValue("--series-event").trim(),
+            "stroke-width": 2,
+            "stroke-dasharray": "5 4"
+          }));
+        }
+
+        if (opts.cursor != null) {
+          const xx = x(opts.cursor);
+
+          svg.appendChild(svgEl("line", {
+            x1: xx, y1: T, x2: xx, y2: H - B,
+            stroke: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
+            "stroke-width": 2,
+            "stroke-dasharray": "3 3"
+          }));
+        }
+      }
+
+      const avg = (a) => a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0;
+      const maxAbs = (a) => Math.max(...a.map((x) => Math.abs(x)));
+
+      function paramsFromUI() {
+        return {
+          tau: +$("#tau").value,
+          width: +$("#width").value,
+          rhoS: +$("#rhoS").value,
+          lambdaU: +$("#lambdaU").value,
+          rhoU: +$("#rhoU").value,
+          q0: +$("#q0").value,
+          seed: clamp(parseInt($("#seed").value, 10) || 1, 1, 999999)
+        };
+      }
+
+      function updateOutputs() {
+        $("#tauOut").textContent = Math.round(+$("#tau").value * 100) + "%";
+        $("#widthOut").textContent = (+$("#width").value * 100).toFixed(1) + "%";
+        $("#rhoSOut").textContent = (+$("#rhoS").value).toFixed(2);
+        $("#lambdaUOut").textContent = (+$("#lambdaU").value).toFixed(1);
+        $("#rhoUOut").textContent = (+$("#rhoU").value).toFixed(2);
+        $("#q0Out").textContent = $("#q0").value;
+      }
+
+      function renderAll() {
+        const i = clamp(parseInt($("#cursor").value, 10) || 0, 0, N - 1);
+        $("#cursorLabel").textContent = Math.round(i / (N - 1) * 100) + "%";
+
+        const css = getComputedStyle(document.documentElement);
+
+        draw(
+          $("#priceChart"),
+          [
+            { data: sim.p, color: css.getPropertyValue("--text").trim(), width: 2.5 },
+            { data: sim.orig.bid, color: css.getPropertyValue("--series-original").trim(), width: 1.4, opacity: 0.85 },
+            { data: sim.orig.ask, color: css.getPropertyValue("--series-original").trim(), width: 1.4, opacity: 0.85 },
+            { data: sim.aware.bid, color: css.getPropertyValue("--series-aware").trim(), width: 1.7 },
+            { data: sim.aware.ask, color: css.getPropertyValue("--series-aware").trim(), width: 1.7 }
+          ],
+          {
+            ymin: 0,
+            ymax: 1,
+            formatY: (v) => Math.round(v * 100) + "¢",
+            hazard: sim.hazard,
+            eventIndex: sim.eventIndex,
+            cursor: i
+          }
+        );
+
+        draw(
+          $("#inventoryChart"),
+          [
+            { data: sim.orig.q, color: css.getPropertyValue("--series-original").trim(), width: 2 },
+            { data: sim.aware.q, color: css.getPropertyValue("--series-aware").trim(), width: 2 }
+          ],
+          {
+            formatY: (v) => Math.round(v).toString(),
+            eventIndex: sim.eventIndex,
+            cursor: i
+          }
+        );
+
+        draw(
+          $("#pnlChart"),
+          [
+            { data: sim.orig.pnl.map((x) => x * 100), color: css.getPropertyValue("--series-original").trim(), width: 2 },
+            { data: sim.aware.pnl.map((x) => x * 100), color: css.getPropertyValue("--series-aware").trim(), width: 2 }
+          ],
+          {
+            formatY: (v) => v.toFixed(1) + "¢",
+            eventIndex: sim.eventIndex,
+            cursor: i
+          }
+        );
+
+        renderSnapshot(i);
+      }
+
+      function renderStats() {
+        const ei = sim.eventIndex;
+
+        $("#eventTime").textContent =
+          ei == null ? "not realized" : Math.round(ei / (N - 1) * 100) + "% of horizon";
+
+        $("#finalPnl").innerHTML =
+          '<span class="orig">Original ' + pnlFmt(sim.orig.pnl.at(-1)) + "</span><br>" +
+          '<span class="aware">Timing-aware ' + pnlFmt(sim.aware.pnl.at(-1)) + "</span>";
+
+        $("#pickoffLoss").innerHTML =
+          '<span class="orig">Original ' + cents(sim.makers.orig.pickoff) + "</span><br>" +
+          '<span class="aware">Timing-aware ' + cents(sim.makers.aware.pickoff) + "</span>";
+
+        const end = ei == null ? N : Math.max(1, ei);
+
+        $("#preSpread").innerHTML =
+          '<span class="orig">Original ' + cents(avg(sim.orig.spread.slice(0, end))) + "</span><br>" +
+          '<span class="aware">Timing-aware ' + cents(avg(sim.aware.spread.slice(0, end))) + "</span>";
+
+        $("#maxInv").innerHTML =
+          '<span class="orig">Original ' + maxAbs(sim.orig.q) + "</span><br>" +
+          '<span class="aware">Timing-aware ' + maxAbs(sim.aware.q) + "</span>";
+      }
+
+      function renderSnapshot(i) {
+        if (!sim) return;
+
+        const p = sim.p[i];
+        const h = sim.hazard[i] || 0;
+        const kind = sim.eventKind[i] || "—";
+
+        $("#snapshot").innerHTML =
+          '<div class="snap-card">' +
+            '<div class="snap-label">Market</div>' +
+            '<strong>p = ' + cents(p) + "</strong><br>" +
+            "conditional event probability this step = " + (100 * h).toFixed(1) + "%<br>" +
+            "realized transition: " + kind +
+          "</div>" +
+
+          '<div class="snap-card">' +
+            '<div class="snap-label">Original quotes</div>' +
+            '<strong class="orig">' + cents(sim.orig.bid[i]) + " / " + cents(sim.orig.ask[i]) + "</strong><br>" +
+            "q = " + sim.orig.q[i] + "<br>" +
+            "P&amp;L " + pnlFmt(sim.orig.pnl[i]) +
+          "</div>" +
+
+          '<div class="snap-card">' +
+            '<div class="snap-label">Timing-aware quotes</div>' +
+            '<strong class="aware">' + cents(sim.aware.bid[i]) + " / " + cents(sim.aware.ask[i]) + "</strong><br>" +
+            "q = " + sim.aware.q[i] + "<br>" +
+            "P&amp;L " + pnlFmt(sim.aware.pnl[i]) +
+          "</div>" +
+
+          '<div class="snap-card">' +
+            '<div class="snap-label">Policy difference</div>' +
+            "spread Δ = " + cents(sim.aware.spread[i] - sim.orig.spread[i]) + "<br>" +
+            "inventory Δ = " + (sim.aware.q[i] - sim.orig.q[i]) + "<br>" +
+            "P&amp;L Δ = " + pnlFmt(sim.aware.pnl[i] - sim.orig.pnl[i]) +
+          "</div>";
+      }
+
+      function solveAndRun() {
+        updateOutputs();
+        const params = paramsFromUI();
+        $("#seed").value = params.seed;
+
+        $("#status").textContent = "Solving the Bellman system…";
+        $("#solve").disabled = true;
+
+        requestAnimationFrame(() => {
+          setTimeout(() => {
+            try {
+              solved = solvePolicies(params);
+              sim = simulate(params, solved);
+              renderStats();
+              renderAll();
+
+              $("#status").textContent =
+                "Solved. Darker orange shading means the anticipated event is more likely to arrive in that interval; the dashed red line is the realized one-shot release.";
+            } catch (err) {
+              console.error(err);
+              $("#status").textContent =
+                "The solver encountered an error. Try resetting the controls.";
+            } finally {
+              $("#solve").disabled = false;
+            }
+          }, 0);
+        });
+      }
+
+      $("#controls").addEventListener("submit", (e) => {
+        e.preventDefault();
+        solveAndRun();
+      });
+
+      ["#tau", "#width", "#rhoS", "#lambdaU", "#rhoU", "#q0"].forEach((s) => {
+        $(s).addEventListener("input", updateOutputs);
+      });
+
+      $("#cursor").addEventListener("input", renderAll);
+
+      const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
+      if (themeMedia.addEventListener) {
+        themeMedia.addEventListener("change", () => {
+          if (sim) renderAll();
+        });
+      }
+
+      updateOutputs();
+      solveAndRun();
+    })();
+  </script>
+</body>
+</html>

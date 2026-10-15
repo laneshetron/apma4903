@@ -79,6 +79,14 @@ testdata/            fixtures shared by Go and Python tests; spot/ has sample ve
 research/            findings and generated reports
 ```
 
+## Event-aware market-making research
+
+The [event-aware market-making study](research/event-aware/README.md) contains
+its [paper (PDF)](research/event-aware/event_aware_market_making.pdf), LaTeX source,
+a standalone interactive prototype, and reproducible Monte Carlo comparisons
+with a constrained Feil–Nendel diffusion benchmark. Results are synthetic model
+experiments; the directory includes parameters, validation checks, and limitations.
+
 ## Development
 
 ```
