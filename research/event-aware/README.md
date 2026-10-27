@@ -23,7 +23,10 @@ path-level outcomes, direct policy-value checks, and coarse/fine grid comparison
 The prototype's three charts are reproduced from its original JavaScript using
 default settings and seed 2718. This illustrative path uses a separate, coarser
 configuration; its implementation differences are documented in the paper.
-These materials are model experiments, not an empirical backtest or a calibrated
+The Monte Carlo study and the prototype are model experiments. Section 12 adds an
+empirical replay on Kalshi's New York daily-high-temperature contracts (public
+quote and trade history, out of sample April–September 2026) with a mixture news
+kernel; it is a historical replay without order books, not a calibrated
 live-trading strategy. The diffusion benchmark specializes and restricts the
 Feil–Nendel framework rather than reproducing that paper's original calibration.
 
