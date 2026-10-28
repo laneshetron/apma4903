@@ -47,7 +47,13 @@ replayed against the public trade tape, the mixture-kernel controller,
 calibrated on October 2025--March 2026, earns \$11.03 a day out of sample
 (April--September 2026) against \$5.27 for the two-point kernel and \$3.31 for
 the diffusion benchmark, and learns to withdraw around scheduled station
-reports without a hand-coded calendar.
+reports without a hand-coded calendar. Finally we let fair value move by only a
+fraction $\varphi$ of a news jump, so that a crossed quote can profit from an
+overreaction. On 2024 election night, where information arrives over hours after each poll
+close rather than at known minutes and part of each jump reverted, the controller
+with $\varphi$ fitted on the pre-election weeks earns the most of the policies
+compared across five fill assumptions, and two to three times the diffusion
+benchmark when fills inside the spread are removed.
 \end{abstract}
 
 \section{Scope and modeling conventions}
@@ -254,6 +260,44 @@ and $w_j$ is the share of windows whose $\hat\rho$ is nearest $\rho_j$. Because
 each $\hat\rho$ is assigned to a whole component, the fitted mixture does not
 in general reproduce the sample variance exactly; report both.
 
+\subsection{Partial persistence}
+\label{sec:persistence}
+So far a news event moves the traded price and fair value together: the price at
+which a stale quote is crossed is also the value the filled contract is worth.
+When part of a jump reverts---an overreaction, or a burst of uninformed flow---the
+two separate. Let the market price jump to $p_m'\sim K(\dd p_m'\mid p)$, and let
+fair value move by only a fraction $\varphi\in[0,1]$ of it,
+\begin{equation}
+ p'=p+\varphi\,(p_m'-p).
+ \label{eq:persist}
+\end{equation}
+Trades happen at the market price, so crossing is decided by $p_m'$; the fill and
+the carried inventory are worth $p'$. The event operator \eqref{eq:event} of
+Section~\ref{sec:stale} becomes
+\begin{align}
+ \G^{K,\varphi}_{b,a}[W](t,p,q)=\int\Bigl[
+ &W(t,p',q')+\Delta(p'-b)\,I_b(p_m';b)
+ \notag\\[-2pt]
+ &+\Delta(a-p')\,I_a(p_m';a)\Bigr]K(\dd p_m'\mid p),
+ \label{eq:event-persist}
+\end{align}
+with $q'=q+\Delta I_b(p_m';b)-\Delta I_a(p_m';a)$ and $p'$ from \eqref{eq:persist}.
+Since $K$ is mean-preserving so is \eqref{eq:persist}, $\E[p'\mid p]=p$, and the
+fair-value variance of the event is $\varphi^2v(p)$; the running risk charge uses
+it. $\varphi=1$ recovers \eqref{eq:event}. For $\varphi<1$ a crossed quote is no
+longer a sure loss: a bid crossed by a fall to $p_m'<b$ is worth $p'-b$, which is
+$\delta_b-\varphi\,\lvert p_m'-p\rvert$: positive whenever the persistent part of the
+fall is smaller than the quote's distance, however far the market itself overshot.
+A component of a mixture may carry its own $\varphi_j$.
+
+$\varphi$ is estimated as the regression slope of the price change from just
+before a jump to a horizon $H$ after it on the jump itself,
+$\hat\varphi=\sum Z_iY_i/\sum Z_i^2$, with $Z_i$ the one-period jump and $Y_i$ the
+change over $H$. The choice of $H$ should match the horizon over which the maker
+holds inventory. In the model the probability state is fair value; a replay that
+feeds the controller the observed market price instead quotes around the
+overshoot rather than against it, which is an approximation.
+
 \section{Quotes and execution}
 \subsection{Admissible controls}
 At state $(t,p,q,s)$, the maker posts bid $b$ and ask $a$ in an admissible set
@@ -312,6 +356,7 @@ to $(x+\Delta a,q-\Delta)$. For a reduced value function $V_s$, write
 \end{align}
 
 \subsection{Stale-quote execution at information events}
+\label{sec:stale}
 An information event first reveals $p'$. Before cancellation, a fast trader
 executes one lot against any strictly crossed stale quote:
 \begin{equation}
@@ -1199,6 +1244,109 @@ period are reported; other cities have different stations, report minutes and
 participants. The hazard bumps are placed from the published schedule, not
 estimated; their width and mass are not tuned. A live test with recorded books
 is the next step.
+
+\clearpage
+\section{Empirical application: election night 2024}
+\label{sec:election}
+\subsection{When information arrived}
+We replay Kalshi's 2024 state-level presidential, Senate and governor markets
+from public 1-minute candles and trades. Poll-closing times are published, but
+they fix only when a race starts to move, not when its information arrives. Across
+79 races, the 15 minutes around a state's own poll close carry 3.5\% of the night's
+price variance; two thirds arrives more than 30 minutes after close, as counties
+report. For competitive races, half of the post-close information had arrived a
+median 135 minutes after close (interquartile range 94--174), about 100 minutes in
+states that count quickly and 160 in states that count slowly. Moves are common
+across races: minutes in which the presidential market or at least three other
+races moved by 2--3 cents are 9\% of the night and carry a median 49\% of a race's
+variance, so a race's risk depends on the national timeline (7--11 p.m.\ ET), not
+only its own close. Large moves show no clustering by minute of the hour. The
+event is therefore a hazard plateau after each close plus a common shock, not the
+scheduled atoms of Section~\ref{sec:weather}.
+
+\subsection{Adaptation and calibration}
+Each of the 40 most-traded races is a binary contract with its own inventory
+($\pm5$ lots of 10). One regime with hazard $h(\tau)$, $\tau$ the minutes from the
+race's poll close, replaces the pending/completed pair. The fill curve
+$Ae^{-k\delta}$ and the diffusion scale are fitted on October 21--November 1, 2024
+($1/k\approx2.3$ cents). The hazard (frequency of moves of at least 2 cents per
+minute by $\tau$, peaking at 0.10 per minute 75 minutes after close) and the mixture
+weights are fitted on election night itself; only one such night exists, so these
+are in sample. The persistence \eqref{eq:persist} is fitted on the pre-election
+weeks at $H=60$ minutes: pooled $\hat\varphi=0.57$ from 83 jumps. On the night
+itself the slope is 0.6 for jumps of 2--5 cents and 0.85--0.95 for 5--12 cents
+(Figure~\ref{fig:election}B). The diffusion benchmark is the same solve with no
+event terms. Both controllers may withdraw. They are replayed from November 2 to
+noon ET on November 6 against the public trades, with quotes formed from the
+previous minute's candle, and flattened at the end with the taker fee.
+
+\subsection{Results}
+\begin{table}[htbp]
+\centering\small
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+Controller & base & beyond market & $\ge$2c through & 25\% of fills & 2-min quotes & contracts & peak capital\\
+\midrule
+Diffusion benchmark & +498 & +146 & +103 & +393 & +468 & 52,407 & \$903\\
+Event-aware, $\varphi=1$ & +176 & +163 & +58 & +140 & +169 & 3,307 & \$455\\
+\textbf{Event-aware, $\varphi$ from pre-election weeks} & \textbf{+521} & \textbf{+376} & \textbf{+287} & \textbf{+467} & \textbf{+470} & 6,796 & \$615\\
+\bottomrule
+\end{tabular}}
+\caption{2024 election, 40 races, November 2 to November 6 noon ET, net dollars after
+flattening, under five fill assumptions: a trade through our quote fills us in full
+when it also trades through the market's quote and a quarter when only through our
+improved quote (base); only the former (beyond market); only trades at least 2 cents
+through our price; a quarter of every fill; quotes from the candle two minutes old.
+Peak capital is Kalshi collateral (resting orders and positions, netted per market).}
+\label{tab:election}
+\end{table}
+
+With $\varphi=1$ the event-aware controller withdraws around the post-close hazard
+and trades sixteen times less than the diffusion benchmark, earning more per
+contract but a third as much in total: on this night jumps partly reverted, and
+staying in the market paid. With $\varphi$ fitted before the election it stays
+in more often, earns the most under every fill assumption, and is two to three times the
+benchmark under the two assumptions that remove fills inside the spread---the
+least certain part of the replay---while using a third less capital. Nearly all of
+the P\&L is made after polls close (Figure~\ref{fig:election}A).
+
+\begin{figure}[htbp]
+\centering
+{\footnotesize
+\textcolor{benchmark}{\rule{12pt}{1pt}} Diffusion benchmark\quad
+\textcolor{prototypeoriginal}{\rule{12pt}{1pt}} Event-aware, $\varphi=1$\quad
+\textcolor{eventaware}{\rule{12pt}{1pt}} Event-aware, $\varphi$ from pre-election weeks}\par\medskip
+\begin{tikzpicture}
+\begin{groupplot}[group style={group size=2 by 1,horizontal sep=1.5cm},
+width=0.47\linewidth,height=0.36\linewidth,
+label style={font=\scriptsize},tick label style={font=\scriptsize},
+title style={font=\small},axis lines=left,ymajorgrids,grid style={gray!20}]
+\nextgroupplot[title={A: Marked P\&L, 40 races},xlabel={Days from Nov 2, 00:00 ET},ylabel={\$},xmin=0,xmax=4.5]
+\fill[prototypehazard!15] (axis cs:3.79,-50) rectangle (axis cs:4.04,650);
+\addplot[benchmark,thick] coordinates {(0.000,0.0) (0.021,0.0) (0.042,0.0) (0.062,0.0) (0.083,-1.0) (0.104,-3.6) (0.125,-3.6) (0.146,-3.6) (0.167,-3.6) (0.188,-3.6) (0.208,-3.6) (0.229,-3.6) (0.250,-3.6) (0.271,-3.6) (0.292,-3.6) (0.312,-17.3) (0.333,-19.3) (0.354,-17.0) (0.375,-17.3) (0.396,-18.2) (0.417,-19.5) (0.438,-19.6) (0.458,-19.3) (0.479,-19.4) (0.500,-19.5) (0.521,-19.4) (0.542,-19.4) (0.562,-19.4) (0.583,-19.4) (0.604,-19.1) (0.625,-19.1) (0.646,-19.0) (0.667,-19.0) (0.688,-19.0) (0.708,-19.1) (0.729,-18.9) (0.750,-18.9) (0.771,-17.1) (0.792,-12.7) (0.812,-10.8) (0.833,-9.0) (0.854,-8.5) (0.875,-9.4) (0.896,-9.9) (0.917,-9.1) (0.938,-8.4) (0.958,-8.0) (0.979,-7.6) (1.000,-7.6) (1.021,-7.6) (1.042,-7.6) (1.062,-7.5) (1.083,-7.2) (1.104,-7.2) (1.125,-7.4) (1.146,-7.3) (1.167,-7.3) (1.188,-7.3) (1.208,-7.3) (1.229,-7.3) (1.250,-7.3) (1.271,-7.3) (1.292,-7.4) (1.312,-8.5) (1.333,-8.5) (1.354,-7.1) (1.375,-6.6) (1.396,-5.0) (1.417,-5.2) (1.438,-5.2) (1.458,-5.5) (1.479,-5.1) (1.500,-4.6) (1.521,-4.7) (1.542,-4.5) (1.562,-4.4) (1.583,-4.8) (1.604,-5.2) (1.625,-4.8) (1.646,-4.8) (1.667,-4.8) (1.688,-4.7) (1.708,-4.6) (1.729,-4.0) (1.750,-3.6) (1.771,-3.9) (1.792,-3.9) (1.812,-4.3) (1.833,-3.9) (1.854,-4.3) (1.875,-4.4) (1.896,-4.4) (1.917,-3.4) (1.938,-3.8) (1.958,-3.6) (1.979,-3.5) (2.000,-3.7) (2.021,-3.7) (2.042,-3.7) (2.062,-3.8) (2.083,-3.7) (2.104,-3.0) (2.125,-3.0) (2.146,-2.9) (2.167,-2.9) (2.188,-3.0) (2.208,-3.2) (2.229,-3.2) (2.250,-3.2) (2.271,-2.7) (2.292,-2.9) (2.312,-2.7) (2.333,-2.4) (2.354,-1.8) (2.375,-1.1) (2.396,-2.0) (2.417,-2.2) (2.438,-2.3) (2.458,-2.5) (2.479,-2.1) (2.500,-2.0) (2.521,-2.1) (2.542,-2.1) (2.562,-1.9) (2.583,-1.6) (2.604,0.9) (2.625,1.2) (2.646,1.2) (2.667,0.7) (2.688,1.4) (2.708,1.6) (2.729,1.6) (2.750,2.7) (2.771,2.2) (2.792,2.0) (2.812,2.4) (2.833,2.2) (2.854,2.0) (2.875,2.5) (2.896,4.6) (2.917,5.7) (2.938,5.6) (2.958,5.4) (2.979,5.7) (3.000,6.1) (3.021,5.6) (3.042,5.8) (3.062,7.8) (3.083,8.1) (3.104,8.2) (3.125,8.2) (3.146,8.1) (3.167,8.2) (3.188,8.1) (3.208,8.2) (3.229,8.2) (3.250,8.4) (3.271,8.2) (3.292,8.3) (3.312,8.6) (3.333,8.7) (3.354,9.6) (3.375,9.6) (3.396,9.7) (3.417,9.8) (3.438,9.6) (3.458,10.5) (3.479,10.8) (3.500,10.6) (3.521,9.7) (3.542,9.5) (3.562,9.2) (3.583,9.8) (3.604,10.9) (3.625,11.6) (3.646,11.9) (3.667,12.1) (3.688,12.1) (3.708,11.5) (3.729,13.5) (3.750,16.2) (3.771,22.2) (3.792,36.6) (3.812,54.5) (3.833,81.2) (3.854,119.9) (3.875,186.0) (3.896,241.4) (3.917,278.9) (3.938,328.7) (3.958,365.0) (3.979,387.7) (4.000,425.6) (4.021,525.2) (4.042,499.2) (4.062,448.6) (4.083,432.5) (4.104,408.3) (4.125,447.2) (4.146,453.0) (4.167,489.6) (4.188,487.6) (4.208,458.2) (4.229,491.3) (4.250,482.5) (4.271,454.9) (4.292,456.1) (4.312,419.9) (4.333,464.4) (4.354,441.2) (4.375,410.7) (4.396,457.4) (4.417,471.5) (4.438,507.8) (4.458,491.4) (4.479,512.4) (4.500,513.1)};
+\addplot[prototypeoriginal,thick] coordinates {(0.000,0.0) (0.021,0.0) (0.042,0.0) (0.062,0.0) (0.083,-0.2) (0.104,-2.8) (0.125,-2.8) (0.146,-2.8) (0.167,-2.8) (0.188,-2.8) (0.208,-2.8) (0.229,-2.8) (0.250,-2.8) (0.271,-2.8) (0.292,-2.8) (0.312,-16.4) (0.333,-18.5) (0.354,-16.1) (0.375,-16.5) (0.396,-17.3) (0.417,-18.7) (0.438,-18.7) (0.458,-18.5) (0.479,-18.5) (0.500,-18.6) (0.521,-18.6) (0.542,-18.6) (0.562,-18.6) (0.583,-18.6) (0.604,-18.4) (0.625,-18.4) (0.646,-18.2) (0.667,-18.2) (0.688,-18.3) (0.708,-18.3) (0.729,-18.2) (0.750,-18.2) (0.771,-15.2) (0.792,-13.1) (0.812,-12.4) (0.833,-11.0) (0.854,-10.4) (0.875,-10.9) (0.896,-11.1) (0.917,-10.0) (0.938,-9.4) (0.958,-9.5) (0.979,-9.2) (1.000,-9.3) (1.021,-9.4) (1.042,-9.4) (1.062,-9.3) (1.083,-9.0) (1.104,-9.0) (1.125,-9.1) (1.146,-9.1) (1.167,-9.1) (1.188,-9.1) (1.208,-9.1) (1.229,-9.1) (1.250,-9.1) (1.271,-9.1) (1.292,-9.2) (1.312,-9.7) (1.333,-9.7) (1.354,-9.2) (1.375,-8.8) (1.396,-6.4) (1.417,-6.5) (1.438,-6.5) (1.458,-6.7) (1.479,-6.5) (1.500,-6.1) (1.521,-6.1) (1.542,-6.0) (1.562,-6.0) (1.583,-6.2) (1.604,-6.4) (1.625,-6.2) (1.646,-6.2) (1.667,-6.2) (1.688,-6.2) (1.708,-6.1) (1.729,-5.8) (1.750,-5.7) (1.771,-5.8) (1.792,-5.8) (1.812,-5.9) (1.833,-5.7) (1.854,-6.0) (1.875,-6.0) (1.896,-6.0) (1.917,-5.2) (1.938,-5.3) (1.958,-5.2) (1.979,-5.2) (2.000,-5.3) (2.021,-5.3) (2.042,-5.3) (2.062,-5.3) (2.083,-5.3) (2.104,-5.0) (2.125,-4.9) (2.146,-4.9) (2.167,-4.9) (2.188,-5.0) (2.208,-5.0) (2.229,-5.0) (2.250,-5.0) (2.271,-4.9) (2.292,-5.0) (2.312,-5.0) (2.333,-4.8) (2.354,-4.6) (2.375,-4.3) (2.396,-4.6) (2.417,-2.5) (2.438,-2.7) (2.458,-2.9) (2.479,-2.8) (2.500,-2.7) (2.521,-2.8) (2.542,-2.8) (2.562,-2.8) (2.583,-3.4) (2.604,-2.4) (2.625,-1.6) (2.646,-1.7) (2.667,-1.7) (2.688,-1.5) (2.708,-1.6) (2.729,-1.6) (2.750,-1.4) (2.771,-1.6) (2.792,-1.6) (2.812,-1.5) (2.833,-1.7) (2.854,-1.8) (2.875,-1.7) (2.896,0.3) (2.917,1.6) (2.938,1.4) (2.958,1.0) (2.979,0.9) (3.000,1.2) (3.021,1.3) (3.042,1.4) (3.062,2.7) (3.083,3.2) (3.104,3.3) (3.125,3.2) (3.146,3.1) (3.167,3.1) (3.188,3.1) (3.208,3.1) (3.229,3.1) (3.250,3.1) (3.271,3.0) (3.292,3.0) (3.312,3.1) (3.333,3.2) (3.354,3.8) (3.375,3.9) (3.396,4.0) (3.417,4.0) (3.438,3.8) (3.458,4.6) (3.479,5.1) (3.500,5.5) (3.521,5.1) (3.542,5.0) (3.562,5.0) (3.583,5.5) (3.604,5.9) (3.625,5.8) (3.646,6.0) (3.667,5.9) (3.688,5.6) (3.708,5.2) (3.729,5.3) (3.750,5.1) (3.771,5.0) (3.792,6.8) (3.812,7.2) (3.833,6.4) (3.854,6.4) (3.875,8.8) (3.896,39.6) (3.917,53.7) (3.938,79.2) (3.958,78.9) (3.979,71.3) (4.000,140.9) (4.021,111.8) (4.042,101.1) (4.062,97.7) (4.083,136.3) (4.104,113.4) (4.125,109.7) (4.146,123.4) (4.167,108.6) (4.188,115.7) (4.208,127.9) (4.229,151.0) (4.250,159.5) (4.271,197.1) (4.292,193.2) (4.312,185.5) (4.333,197.0) (4.354,197.1) (4.375,174.0) (4.396,208.8) (4.417,197.3) (4.438,206.1) (4.458,207.5) (4.479,187.1) (4.500,186.3)};
+\addplot[eventaware,thick] coordinates {(0.000,0.0) (0.021,0.0) (0.042,0.0) (0.062,0.0) (0.083,-0.9) (0.104,-3.5) (0.125,-3.5) (0.146,-3.5) (0.167,-3.5) (0.188,-3.5) (0.208,-3.5) (0.229,-3.5) (0.250,-3.5) (0.271,-3.5) (0.292,-3.5) (0.312,-17.2) (0.333,-19.2) (0.354,-16.9) (0.375,-17.2) (0.396,-18.0) (0.417,-19.4) (0.438,-19.4) (0.458,-19.2) (0.479,-19.3) (0.500,-19.3) (0.521,-19.3) (0.542,-19.3) (0.562,-19.3) (0.583,-19.3) (0.604,-19.0) (0.625,-19.0) (0.646,-18.8) (0.667,-18.9) (0.688,-18.9) (0.708,-19.0) (0.729,-18.8) (0.750,-18.8) (0.771,-15.0) (0.792,-12.1) (0.812,-10.1) (0.833,-8.5) (0.854,-8.3) (0.875,-9.2) (0.896,-9.5) (0.917,-8.9) (0.938,-8.2) (0.958,-7.7) (0.979,-7.2) (1.000,-7.3) (1.021,-7.4) (1.042,-7.4) (1.062,-7.3) (1.083,-6.8) (1.104,-6.8) (1.125,-7.0) (1.146,-7.0) (1.167,-7.0) (1.188,-7.0) (1.208,-7.0) (1.229,-7.0) (1.250,-7.0) (1.271,-7.0) (1.292,-7.1) (1.312,-8.2) (1.333,-8.2) (1.354,-6.4) (1.375,-6.0) (1.396,-4.7) (1.417,-4.9) (1.438,-4.9) (1.458,-5.3) (1.479,-5.0) (1.500,-4.6) (1.521,-4.6) (1.542,-4.5) (1.562,-4.5) (1.583,-4.7) (1.604,-4.9) (1.625,-4.7) (1.646,-4.7) (1.667,-4.6) (1.688,-4.7) (1.708,-4.6) (1.729,-4.2) (1.750,-3.9) (1.771,-4.2) (1.792,-4.2) (1.812,-4.6) (1.833,-4.3) (1.854,-4.6) (1.875,-4.6) (1.896,-4.8) (1.917,-3.7) (1.938,-4.0) (1.958,-3.8) (1.979,-3.8) (2.000,-3.9) (2.021,-3.9) (2.042,-3.9) (2.062,-4.0) (2.083,-3.9) (2.104,-3.2) (2.125,-3.1) (2.146,-3.1) (2.167,-3.1) (2.188,-3.1) (2.208,-3.3) (2.229,-3.3) (2.250,-3.4) (2.271,-3.1) (2.292,-3.3) (2.312,-3.2) (2.333,-2.8) (2.354,-2.3) (2.375,-1.7) (2.396,-2.3) (2.417,-1.4) (2.438,-1.7) (2.458,-1.9) (2.479,-1.6) (2.500,-1.3) (2.521,-1.2) (2.542,-1.1) (2.562,-0.9) (2.583,-1.4) (2.604,0.3) (2.625,1.3) (2.646,1.4) (2.667,0.8) (2.688,1.4) (2.708,1.5) (2.729,1.5) (2.750,2.0) (2.771,1.7) (2.792,1.5) (2.812,1.7) (2.833,1.5) (2.854,1.2) (2.875,1.8) (2.896,3.8) (2.917,4.7) (2.938,4.5) (2.958,4.2) (2.979,4.4) (3.000,4.8) (3.021,5.1) (3.042,5.3) (3.062,7.4) (3.083,7.6) (3.104,7.7) (3.125,7.5) (3.146,7.5) (3.167,7.7) (3.188,7.2) (3.208,7.1) (3.229,7.1) (3.250,7.3) (3.271,7.1) (3.292,7.2) (3.312,7.4) (3.333,7.5) (3.354,8.8) (3.375,8.7) (3.396,9.1) (3.417,9.2) (3.438,9.1) (3.458,10.0) (3.479,10.7) (3.500,10.5) (3.521,9.6) (3.542,9.5) (3.562,9.2) (3.583,10.0) (3.604,11.0) (3.625,11.8) (3.646,11.9) (3.667,12.0) (3.688,11.2) (3.708,11.2) (3.729,11.8) (3.750,12.4) (3.771,13.1) (3.792,17.9) (3.812,24.7) (3.833,37.6) (3.854,43.3) (3.875,44.1) (3.896,68.9) (3.917,119.5) (3.938,134.3) (3.958,195.1) (3.979,247.5) (4.000,332.3) (4.021,316.7) (4.042,349.4) (4.062,374.4) (4.083,387.1) (4.104,422.9) (4.125,451.1) (4.146,493.2) (4.167,426.0) (4.188,467.6) (4.208,498.6) (4.229,544.0) (4.250,521.4) (4.271,578.6) (4.292,553.9) (4.312,588.4) (4.333,594.3) (4.354,601.7) (4.375,581.1) (4.396,587.3) (4.417,574.2) (4.438,563.0) (4.458,551.6) (4.479,517.0) (4.500,539.1)};
+\nextgroupplot[title={B: Persistence by jump size, election night},xlabel={Jump size},ylabel={$\hat\varphi$},
+ymin=0,ymax=1.1,ybar,bar width=10pt,xtick={0,...,5},xticklabels={2-3c,3-5c,5-8c,8-12c,12-20c,20-35c},
+x tick label style={font=\tiny},xmin=-0.6,xmax=5.6]
+\addplot[fill=eventaware,draw=none] coordinates {(0,0.611) (1,0.605) (2,0.945) (3,0.851) (4,0.497) (5,0.745)};
+\draw[benchmark,dashed] (axis cs:-0.6,0.571) -- (axis cs:5.6,0.571);
+\end{groupplot}\end{tikzpicture}
+\caption{Panel A: P\&L marked to the mid every 30 minutes; shaded, 7 p.m.\ to 1 a.m.\ ET on
+November 5. Panel B: slope of the 60-minute change on a 1-minute jump, by jump size;
+dashed, the pooled pre-election estimate used by the controller.}
+\label{fig:election}
+\end{figure}
+
+\subsection{Limitations}
+One election night, whose 40 races move with one national story, is effectively one
+observation. The hazard and kernel weights are fitted on that night. The replay
+forms quotes from 1-minute candles that exist only in active minutes, has no queue
+or depth, and feeds the controller the market price rather than a fair-value
+estimate. The two pessimistic fill assumptions bound some of this, not all of it.
+A 2026 test calibrated entirely on pre-election data, and replayed against a
+recorded order book, is the next step.
 
 \clearpage
 \appendix
