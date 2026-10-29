@@ -39,6 +39,21 @@ being pending or completed. We give the event operator, terminal conditions,
 a qualified spread-widening result, and a reproducible Monte Carlo comparison
 with a constrained diffusion benchmark. The numerical experiment measures
 performance under synthetic news and execution assumptions.
+We then replace the single two-point news kernel by a mixture of two-point
+kernels, which keeps the event operator mean-preserving while allowing
+heavy-tailed jumps, and admit endpoint quotes as an explicit withdrawal
+control. Applied to Kalshi's New York daily-high-temperature contracts and
+replayed against the public trade tape, the mixture-kernel controller,
+calibrated on October 2025--March 2026, earns \$11.03 a day out of sample
+(April--September 2026) against \$5.27 for the two-point kernel and \$3.31 for
+the diffusion benchmark, and learns to withdraw around scheduled station
+reports without a hand-coded calendar. Finally we let fair value move by only a
+fraction $\varphi$ of a news jump, so that a crossed quote can profit from an
+overreaction. On 2024 election night, where information arrives over hours after each poll
+close rather than at known minutes and part of each jump reverted, we treat poll
+closings as the only scheduled events and fit every parameter on the pre-election
+weeks. The resulting controller earns \$631 against \$498 for the diffusion
+benchmark, and about twice the benchmark when fills inside the spread are removed.
 \end{abstract}
 
 \section{Scope and modeling conventions}
@@ -206,6 +221,83 @@ Use separate parameters $\rho_u$ and $\rho_s$ for the two event types.
 $\rho=0$ produces no news and $\rho=1$ fully resolves the probability.
 Mean-preserving kernels on $[0,1]$ are degenerate at $p=0$ and $p=1$.
 
+\subsection{Mixtures of two-point kernels}
+\label{sec:mixture}
+A single $K_\rho$ moves the probability by the same relative amount at every
+arrival. Observed information events are rarely like that: most move the price
+very little and a few move it a great deal (Section~\ref{sec:weather}).
+Matching only the variance $\rho^2p(1-p)$ then places the whole jump at its
+root-mean-square size, which is larger than the typical move and smaller than
+the tail. For weights $w_j\ge0$ with $\sum_jw_j=1$ and sizes
+$0\le\rho_1<\dots<\rho_J\le1$, define
+\begin{equation}
+ K_{\mathbf w}=\sum_{j=1}^J w_jK_{\rho_j}.
+ \label{eq:mixture}
+\end{equation}
+Each component is mean-preserving and supported on $[0,1]$, so the mixture is too:
+\begin{equation}
+ \E[p'\mid p]=p,\qquad
+ \E[(p'-p)^2\mid p]=\Bigl(\sum_jw_j\rho_j^2\Bigr)p(1-p).
+\end{equation}
+The event operator is linear in the kernel,
+\begin{equation}
+ \G^{K_{\mathbf w}}_{b,a}[W]=\sum_jw_j\,\G^{K_{\rho_j}}_{b,a}[W],
+\end{equation}
+so the Bellman equations below are unchanged in form: an event type with
+intensity $\lambda$ and kernel $K_{\mathbf w}$ contributes the components
+$(\lambda w_j,K_{\rho_j})$ as separate atomic-kernel terms. The two-point kernel is
+the case $J=1$. The mixture keeps the strict-crossing thresholds explicit: on
+the ask side they are $\rho_j(1-p)$ for each $j$, on the bid side $\rho_jp$.
+
+Weights can be estimated from observed event windows. For a pre-event
+probability $p_0$ and post-event probability $p_1$, the two-point size that would
+produce the move is
+\begin{equation}
+ \hat\rho=\begin{cases}(p_1-p_0)/(1-p_0),&p_1>p_0,\\(p_0-p_1)/p_0,&p_1\le p_0,\end{cases}
+ \label{eq:rhohat}
+\end{equation}
+and $w_j$ is the share of windows whose $\hat\rho$ is nearest $\rho_j$. Because
+each $\hat\rho$ is assigned to a whole component, the fitted mixture does not
+in general reproduce the sample variance exactly; report both.
+
+\subsection{Partial persistence}
+\label{sec:persistence}
+So far a news event moves the traded price and fair value together: the price at
+which a stale quote is crossed is also the value the filled contract is worth.
+When part of a jump reverts---an overreaction, or a burst of uninformed flow---the
+two separate. Let the market price jump to $p_m'\sim K(\dd p_m'\mid p)$, and let
+fair value move by only a fraction $\varphi\in[0,1]$ of it,
+\begin{equation}
+ p'=p+\varphi\,(p_m'-p).
+ \label{eq:persist}
+\end{equation}
+Trades happen at the market price, so crossing is decided by $p_m'$; the fill and
+the carried inventory are worth $p'$. The event operator \eqref{eq:event} of
+Section~\ref{sec:stale} becomes
+\begin{align}
+ \G^{K,\varphi}_{b,a}[W](t,p,q)=\int\Bigl[
+ &W(t,p',q')+\Delta(p'-b)\,I_b(p_m';b)
+ \notag\\[-2pt]
+ &+\Delta(a-p')\,I_a(p_m';a)\Bigr]K(\dd p_m'\mid p),
+ \label{eq:event-persist}
+\end{align}
+with $q'=q+\Delta I_b(p_m';b)-\Delta I_a(p_m';a)$ and $p'$ from \eqref{eq:persist}.
+Since $K$ is mean-preserving so is \eqref{eq:persist}, $\E[p'\mid p]=p$, and the
+fair-value variance of the event is $\varphi^2v(p)$; the running risk charge uses
+it. $\varphi=1$ recovers \eqref{eq:event}. For $\varphi<1$ a crossed quote is no
+longer a sure loss: a bid crossed by a fall to $p_m'<b$ is worth $p'-b$, which is
+$\delta_b-\varphi\,\lvert p_m'-p\rvert$: positive whenever the persistent part of the
+fall is smaller than the quote's distance, however far the market itself overshot.
+A component of a mixture may carry its own $\varphi_j$.
+
+$\varphi$ is estimated as the regression slope of the price change from just
+before a jump to a horizon $H$ after it on the jump itself,
+$\hat\varphi=\sum Z_iY_i/\sum Z_i^2$, with $Z_i$ the one-period jump and $Y_i$ the
+change over $H$. The choice of $H$ should match the horizon over which the maker
+holds inventory. In the model the probability state is fair value; a replay that
+feeds the controller the observed market price instead quotes around the
+overshoot rather than against it, which is an approximation.
+
 \section{Quotes and execution}
 \subsection{Admissible controls}
 At state $(t,p,q,s)$, the maker posts bid $b$ and ask $a$ in an admissible set
@@ -225,6 +317,16 @@ maximum quote displacement $D$:
 Otherwise endpoint quotes can serve as effective protection against pickoff.
 The restriction that quotes straddle $p$ is an assumption of this model and limits how aggressively
 the maker can skew to reduce inventory.
+
+\paragraph{Withdrawal as a control.} The endpoint quotes $b=0$ and $a=1$
+($\delta_b=p$, $\delta_a=1-p$) receive, by strict crossing, no stale
+fills, and ordinary fills at rate $Ae^{-kp}$ or $Ae^{-k(1-p)}$, which is
+negligible at calibrated $k$ away from the boundaries. In the replay below an endpoint
+quote is implemented as posting nothing on that side; the solver keeps the small
+exponential rate, a slight inconsistency we retain for simplicity. When the experiment does not require continuous
+participation, we drop the cap \eqref{eq:cap} for these two actions only and
+add them to the candidate set, so that withdrawal is chosen by the optimization
+rather than imposed by a calendar. Ordinary quotes remain subject to $D$.
 
 The analytical state space is $\Delta\mathbb Z$. For finite-grid computation,
 choose inventory limits and explicitly disable any side that would violate
@@ -254,6 +356,7 @@ to $(x+\Delta a,q-\Delta)$. For a reduced value function $V_s$, write
 \end{align}
 
 \subsection{Stale-quote execution at information events}
+\label{sec:stale}
 An information event first reveals $p'$. Before cancellation, a fast trader
 executes one lot against any strictly crossed stale quote:
 \begin{equation}
@@ -394,6 +497,53 @@ is a myopic statement, not a general theorem for the full inventory-dependent
 Bellman system. In particular, full event operators with atomic kernels can
 change discontinuously at fill thresholds because continuation inventory changes.
 
+\subsection{Heavy tails and withdrawal}
+\label{sec:withdraw}
+Under a mixture \eqref{eq:mixture} the ask-side jump is $Z=\rho_j(1-p)$ with
+probability $w_jp$ (and negative otherwise), so the myopic stale loss is
+\begin{equation}
+ h\Delta\E[(Z-\delta)_+]=h\Delta p\sum_jw_j\bigl(\rho_j(1-p)-\delta\bigr)_+,
+\end{equation}
+piecewise linear and nonincreasing in $\delta$ with kinks at the thresholds
+$\rho_j(1-p)$. Maximizers of \eqref{eq:myopic} therefore lie at an interior
+stationary point of one linear piece, at a threshold, or at the endpoint.
+
+\begin{proposition}
+Consider the myopic ask problem \eqref{eq:myopic} with admissible ordinary
+distances $[0,D]$, plus the endpoint $\delta=1-p>D$, whose reward is
+$\Delta Ae^{-k(1-p)}(1-p)\ge0$.
+\begin{enumerate}
+ \item Under a two-point kernel $K_\rho$ with $\rho(1-p)\le D$, the quote
+ $\delta=\rho(1-p)$ has zero stale loss and positive reward, so
+ some ordinary quote earns positive reward for every hazard $h$.
+ \item Under a mixture with a component $J$ such that $\rho_J(1-p)>D$, every
+ ordinary quote bears stale loss at least $h\Delta pw_J(\rho_J(1-p)-D)>0$. If
+ \begin{equation}
+ h\,p\,w_J\bigl(\rho_J(1-p)-D\bigr)>\frac{A}{ek},
+ \label{eq:withdraw}
+ \end{equation}
+ every ordinary quote has negative reward and the endpoint is optimal.
+\end{enumerate}
+\end{proposition}
+\begin{proof}
+(1) At $\delta=\rho(1-p)$ the event never strictly crosses the quote, and
+$\Delta Ae^{-k\delta}\delta>0$. (2) For $\delta\le D$,
+$(\rho_J(1-p)-\delta)_+\ge\rho_J(1-p)-D$, and the remaining terms of the loss
+are nonnegative. Ordinary revenue $\Delta Ae^{-k\delta}\delta$ is at most
+$\Delta A/(ek)$, attained at $\delta=1/k$. Under \eqref{eq:withdraw} the loss
+exceeds the revenue for every $\delta\in[0,D]$, while the endpoint reward is
+nonnegative.
+\end{proof}
+
+The comparison is the substantive point. Two kernels with equal variance can
+imply opposite policies: the two-point kernel always offers a ``safe'' quote at
+its jump destination, which is the plateau in Figure~\ref{fig:mc}A, while a
+kernel with a component beyond the displacement cap offers none, and a high
+enough hazard makes withdrawal optimal. Which case a market is in is an
+empirical question about the shape of its jumps, not their variance.
+The same caveats apply as for the first proposition: the result is myopic, and
+inventory continuation values can move the full policy in either direction.
+
 \subsection{Inventory management around anticipated news}
 The pre-event risk rate contains $\gamma q^2h(t)v_s(p)$. Greater imminent
 event exposure creates an incentive to reduce absolute inventory before arrival.
@@ -511,6 +661,9 @@ For $K_\rho$, each event expectation requires only the two destinations
 $p^+$ and $p^-$. Evaluate candidate quotes jointly with the event terms;
 include strict-crossing thresholds in the action search and document equality
 handling. A finite tick/action grid also makes policy attainment explicit.
+For a mixture kernel, every component contributes its own pair of
+destinations and its own thresholds $\rho_jp$ and $\rho_j(1-p)$ to the action set;
+when withdrawal is admitted, add the endpoints $\delta_b=p$ and $\delta_a=1-p$.
 
 Choose a time-stepping method that remains stable as the hazard increases;
 implicit treatment or sufficiently small adaptive steps are natural options.
@@ -905,6 +1058,306 @@ Exact replay data, default settings, and source hashes are saved in
 \path{simulation/prototype_report.py}.
 
 % END GENERATED PROTOTYPE CHARTS
+\clearpage
+\section{Empirical application: Kalshi daily high temperature}
+\label{sec:weather}
+\subsection{Market, data and replay}
+Kalshi's \texttt{KXHIGHNY} series lists, for each climate day, six to eight
+mutually exclusive contracts on the maximum temperature at Central Park. The
+day's information arrives on a published schedule: the station's routine
+hourly report is issued at minute 51 (78\% of New York's reports in April--September
+2026), and the National Weather Service's daily summary messages follow at fixed
+times. On those dates the two minutes after the report minute and after the
+summary minutes carry 51\% of the rescaled mids' squared one-minute changes.
+The anticipated events are therefore known in advance; what is uncertain is
+how much each one moves the price.
+
+We use an open-source replay built entirely on public data: one-minute best bid and ask
+from Kalshi's candlestick history, the full public trade tape, and the
+station's reports and summary messages. Each minute a strategy posts one
+10-contract bid and ask per bin around the rescaled mid; a historical taker
+trade fills a quote it trades through, a quarter of it when the quote improves
+on the market's, and at the quote's price only if that level was then used up.
+Quotes are based on the previous minute's market quotes plus a 2-second delay,
+so they are up to about a minute stale. Positions are held to settlement, and the
+series charges no maker fee. Calibration uses October 2025--March 2026 (182
+climate days); all results are out of sample on April--September 2026 (182 days).
+The same replay engine, fill rule, quote size and inventory limit ($\pm5$ lots) are
+used for every strategy; only the quote construction differs.
+
+\subsection{Adapting the controller}
+The model of Sections~3--6 is for one contract and one anticipated event. We
+make three changes and no others:
+\begin{enumerate}
+ \item Each bin is treated as its own binary contract with its own inventory;
+ cross-bin settlement covariance is ignored.
+ \item The anticipated event recurs. The pending/completed regime is replaced by
+ a single regime with a deterministic hazard: a Gaussian bump of width $0.6$ minutes and
+ integrated hazard $3$ centered 1.5 minutes after each hourly report, and one after
+ each summary message, each with its own kernel. Unscheduled news is set to zero;
+ variance between reports is carried by the diffusion.
+ \item Ordinary fill intensities $A(p)e^{-k(p)\delta}$ are the replay's fitted
+ fill curves by fair-value bucket, so that the execution model is shared with
+ the strategy we compare against.
+\end{enumerate}
+The diffusion scale is fitted on one-minute changes outside report windows,
+$\bar\sigma^2=\sum\Delta p^2/\sum p^2(1-p)^2$; the kernels on the change across
+each window, with the two-point $\rho$ matched to its variance and the mixture
+weights from \eqref{eq:rhohat}. Risk aversion $\gamma$ is chosen from
+$\{0.1,0.3,1\}$ on the calibration-period replay; $\gamma_T=0.02$, $D=0.30$, time
+step 3 seconds, 101 probability nodes.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{lrr}
+\toprule
+& hourly report & summary message\\
+\midrule
+RMS move $/\sqrt{p(1-p)}$ (two-point $\rho$) & 0.128 & 0.424\\
+median $|\Delta p|/\sqrt{p(1-p)}$ & 0.017 & 0.09\\
+99th percentile & 0.49 & 1.60\\
+share of variance in the largest 5\% of moves & 83\% & 61\%\\
+\midrule
+mixture weight on $\rho=0$ & 0.413 & 0.176\\
+\hphantom{mixture weight on} $\rho\in\{0.02,0.05,0.1\}$ & 0.454 & 0.302\\
+\hphantom{mixture weight on} $\rho\in\{0.2,0.35\}$ & 0.099 & 0.229\\
+\hphantom{mixture weight on} $\rho\ge0.55$ & 0.034 & 0.294\\
+\bottomrule
+\end{tabular}
+\caption{Report-window price moves, October 2025--March 2026, and the fitted
+mixture weights on $\rho\in\{0,0.02,0.05,0.1,0.2,0.35,0.55,0.8,1\}$. Diffusion
+scale $\bar\sigma=0.070$ per $\sqrt{\text{minute}}$.}
+\label{tab:weathercal}
+\end{table}
+
+\subsection{Results}
+The reference strategy is a closed-form Feil--Nendel quoting rule for the same series: quotes at the
+exponential-intensity optimum plus a fitted adverse-selection term, inventory coupled across bins through the
+settlement covariance $\operatorname{diag}(p)-pp^\top$ in a Riccati approximation, a hand-coded calendar that
+withdraws for three minutes from each report minute and 150 seconds from each summary message, and a guard
+that posts no bids in bins the day's readings have ruled out. It is evaluated in the same replay.
+
+\begin{table}[htbp]
+\centering\small
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrr}
+\toprule
+Strategy & \$/day & $t$ & days $<0$ & worst day & contracts/day & window fills/day\\
+\midrule
+Diffusion benchmark ($\gamma=0.3$) & 3.31 & 3.6 & 40\% & $-35.24$ & 1,130 & 153\\
+Event-aware, two-point kernel ($\gamma=0.3$) & 5.27 & 6.0 & 32\% & $-40.02$ & 1,085 & 112\\
+Event-aware, mixture kernel ($\gamma=0.1$) & 10.16 & 10.9 & 16\% & $-25.87$ & 1,002 & 34\\
+\textbf{Event-aware, mixture + withdrawal} ($\gamma=0.1$) & \textbf{11.03} & \textbf{11.7} & 13\% & $-18.19$ & 986 & 22\\
+\midrule
+Diffusion benchmark + hard calendar & 9.70 & 10.4 & 15\% & $-26.32$ & 987 & 0\\
+Reference strategy (closed form, hard calendar) & 6.65 & 12.5 & 12\% & $-19.05$ & 487 & 0\\
+Reference strategy, no calendar or guard & 1.88 & 3.0 & 36\% & $-34.28$ & 586 & 96\\
+\bottomrule
+\end{tabular}}
+\caption{Out-of-sample replay, April--September 2026, 182 days, 10-contract
+quotes. $t$ is the mean daily P\&L over its standard error. ``Window fills'' are
+contracts filled inside the hourly-report windows. The hard calendar withdraws all
+quotes for three minutes from each report minute and 150 seconds from each summary
+message.}
+\label{tab:weather}
+\end{table}
+
+Table~\ref{tab:weather} gives three results.
+\emph{(i) The ordering of Section~\ref{sec:mc} holds on real data}: the event-aware
+controller beats the diffusion benchmark with either kernel, by trading less
+inside report windows.
+\emph{(ii) The kernel's shape matters more than its variance.} With the
+variance-matched two-point kernel the controller still takes 112 contracts a
+day inside the windows at $-4.8$ cents each: it widens to the root-mean-square
+jump, which is wider than needed on most reports and well inside the large ones
+(Table~\ref{tab:weathercal}). The mixture kernel, which has the same order of variance but
+puts 3\% of reports beyond $\rho=0.55$, roughly doubles the daily P\&L.
+\emph{(iii) Withdrawal is learned, not imposed.} With endpoint quotes admitted,
+the controller withdraws its bid at 97 of 98 interior probability nodes in a
+report minute and at none in a quiet minute (Figure~\ref{fig:weather}C), and
+beats the best hard-calendar policy, \$11.03 against \$9.70 a day, with a
+smaller worst day. This is case~2 of the proposition in Section~\ref{sec:withdraw}.
+
+\begin{figure}[htbp]
+\centering
+{\footnotesize
+\textcolor{eventaware}{\rule{12pt}{1pt}} Event-aware, mixture + withdrawal\quad
+\textcolor{benchmark}{\rule{12pt}{1pt}} Reference strategy\quad
+\textcolor{prototypeoriginal}{\rule{12pt}{1pt}} Event-aware, two-point\quad
+\textcolor{gray}{\rule{12pt}{1pt}} Diffusion benchmark\quad
+\textcolor{prototypehazard}{\rule{12pt}{1pt}} Reference, no calendar}\par\medskip
+\begin{tikzpicture}
+\begin{groupplot}[group style={group size=2 by 2,horizontal sep=1.35cm,vertical sep=1.85cm},
+width=0.445\linewidth,height=0.34\linewidth,
+label style={font=\scriptsize},tick label style={font=\scriptsize},
+title style={font=\small},axis lines=left,ymajorgrids,grid style={gray!20}]
+\nextgroupplot[title={A: Cumulative P\&L},xlabel={Trading day (from Apr 1, 2026)},ylabel={\$},xmin=0,xmax=181]
+\addplot[eventaware,thick] coordinates {(0,10.120) (1,10.120) (2,23.397) (3,26.737) (4,29.227) (5,31.268) (6,59.995) (7,76.870) (8,80.210) (9,87.895) (10,99.300) (11,104.030) (12,118.380) (13,155.530) (14,176.515) (15,189.122) (16,226.795) (17,242.670) (18,247.537) (19,255.491) (20,299.319) (21,312.134) (22,323.284) (23,330.683) (24,330.439) (25,352.393) (26,356.150) (27,357.113) (28,362.590) (29,396.686) (30,409.567) (31,419.692) (32,458.329) (33,470.317) (34,510.990) (35,524.336) (36,518.095) (37,525.810) (38,535.487) (39,527.638) (40,557.212) (41,585.345) (42,606.355) (43,622.839) (44,635.367) (45,680.625) (46,689.428) (47,688.148) (48,699.785) (49,726.276) (50,726.661) (51,744.559) (52,739.111) (53,743.881) (54,762.548) (55,769.812) (56,787.882) (57,803.572) (58,803.869) (59,814.460) (60,826.051) (61,837.565) (62,855.038) (63,863.792) (64,858.871) (65,899.896) (66,920.754) (67,920.864) (68,935.638) (69,948.276) (70,958.040) (71,978.647) (72,1005.985) (73,1024.572) (74,1035.749) (75,1042.567) (76,1062.427) (77,1047.741) (78,1073.427) (79,1104.190) (80,1129.758) (81,1140.406) (82,1178.071) (83,1178.271) (84,1188.714) (85,1223.236) (86,1244.544) (87,1238.985) (88,1270.938) (89,1294.098) (90,1315.897) (91,1334.221) (92,1361.546) (93,1381.533) (94,1385.565) (95,1385.053) (96,1384.107) (97,1385.030) (98,1385.799) (99,1395.646) (100,1396.397) (101,1386.683) (102,1374.317) (103,1379.388) (104,1366.002) (105,1375.349) (106,1379.456) (107,1391.763) (108,1403.462) (109,1416.642) (110,1459.906) (111,1500.693) (112,1523.613) (113,1535.233) (114,1542.778) (115,1549.343) (116,1536.540) (117,1533.436) (118,1539.105) (119,1577.885) (120,1588.395) (121,1590.070) (122,1589.064) (123,1595.983) (124,1608.935) (125,1647.333) (126,1648.078) (127,1651.489) (128,1667.970) (129,1673.933) (130,1684.112) (131,1682.928) (132,1685.148) (133,1695.903) (134,1729.620) (135,1745.234) (136,1751.654) (137,1755.615) (138,1756.640) (139,1765.586) (140,1772.693) (141,1778.434) (142,1769.961) (143,1776.165) (144,1784.461) (145,1788.507) (146,1778.923) (147,1782.886) (148,1784.948) (149,1792.715) (150,1798.532) (151,1806.950) (152,1810.190) (153,1812.317) (154,1812.097) (155,1817.895) (156,1819.444) (157,1833.674) (158,1871.058) (159,1891.691) (160,1892.471) (161,1898.242) (162,1910.633) (163,1928.394) (164,1935.086) (165,1965.385) (166,1970.116) (167,1963.471) (168,1954.782) (169,1960.129) (170,1961.473) (171,1969.678) (172,1977.121) (173,1978.569) (174,1960.379) (175,1964.688) (176,1966.942) (177,1980.832) (178,1998.040) (179,1999.487) (180,1999.858) (181,2007.095)};
+\addplot[benchmark,thick] coordinates {(0,2.973) (1,2.973) (2,10.785) (3,17.940) (4,14.395) (5,10.650) (6,14.535) (7,32.103) (8,40.153) (9,47.414) (10,57.389) (11,57.476) (12,65.099) (13,82.844) (14,94.641) (15,116.363) (16,137.872) (17,145.571) (18,145.875) (19,146.925) (20,171.721) (21,177.657) (22,189.593) (23,207.369) (24,212.072) (25,228.039) (26,233.920) (27,241.967) (28,244.390) (29,257.279) (30,264.151) (31,273.818) (32,296.885) (33,301.727) (34,328.940) (35,337.515) (36,333.177) (37,337.445) (38,345.281) (39,347.116) (40,367.019) (41,385.901) (42,402.846) (43,413.644) (44,424.054) (45,442.716) (46,451.324) (47,451.524) (48,456.703) (49,473.709) (50,473.768) (51,483.152) (52,482.988) (53,488.662) (54,504.988) (55,508.688) (56,523.336) (57,527.179) (58,527.007) (59,537.229) (60,548.443) (61,552.846) (62,563.784) (63,576.501) (64,576.479) (65,589.821) (66,599.758) (67,600.658) (68,606.260) (69,613.534) (70,619.691) (71,632.266) (72,643.463) (73,658.732) (74,667.091) (75,673.494) (76,680.262) (77,671.665) (78,681.043) (79,689.669) (80,702.168) (81,704.617) (82,735.590) (83,735.590) (84,746.764) (85,763.422) (86,778.344) (87,779.354) (88,794.954) (89,814.536) (90,831.505) (91,840.279) (92,852.159) (93,863.417) (94,864.917) (95,864.598) (96,864.598) (97,864.898) (98,869.178) (99,874.283) (100,876.993) (101,878.072) (102,871.147) (103,881.467) (104,862.419) (105,872.890) (106,880.891) (107,891.530) (108,898.586) (109,909.916) (110,917.654) (111,935.155) (112,930.110) (113,938.881) (114,939.681) (115,944.751) (116,943.017) (117,946.382) (118,945.034) (119,961.761) (120,966.657) (121,971.472) (122,975.904) (123,978.819) (124,992.933) (125,1019.398) (126,1021.658) (127,1028.960) (128,1027.000) (129,1025.676) (130,1030.585) (131,1032.196) (132,1033.696) (133,1037.762) (134,1042.618) (135,1048.748) (136,1047.307) (137,1049.621) (138,1052.159) (139,1056.759) (140,1058.779) (141,1060.429) (142,1062.350) (143,1062.217) (144,1068.672) (145,1076.540) (146,1074.410) (147,1076.112) (148,1077.893) (149,1086.293) (150,1089.045) (151,1091.869) (152,1094.769) (153,1100.652) (154,1098.932) (155,1104.079) (156,1105.179) (157,1117.924) (158,1125.137) (159,1134.042) (160,1137.924) (161,1140.024) (162,1146.175) (163,1155.551) (164,1159.451) (165,1173.315) (166,1178.156) (167,1178.933) (168,1181.175) (169,1182.327) (170,1185.684) (171,1182.995) (172,1188.824) (173,1177.048) (174,1176.730) (175,1178.216) (176,1180.045) (177,1188.582) (178,1203.527) (179,1206.718) (180,1207.988) (181,1209.837)};
+\addplot[prototypeoriginal,dashed] coordinates {(0,-18.587) (1,-18.587) (2,-18.887) (3,-30.577) (4,-32.977) (5,-46.857) (6,-43.652) (7,-37.482) (8,-30.493) (9,-21.033) (10,-9.803) (11,-19.153) (12,-8.705) (13,20.245) (14,41.065) (15,60.408) (16,83.877) (17,90.270) (18,90.724) (19,91.166) (20,132.743) (21,147.680) (22,155.688) (23,147.734) (24,148.833) (25,163.615) (26,161.984) (27,160.997) (28,156.330) (29,182.818) (30,193.234) (31,200.905) (32,240.253) (33,248.840) (34,280.980) (35,296.788) (36,286.981) (37,293.560) (38,300.593) (39,278.750) (40,299.226) (41,330.172) (42,352.983) (43,363.930) (44,380.541) (45,404.822) (46,413.309) (47,412.829) (48,418.625) (49,433.872) (50,435.207) (51,434.936) (52,430.421) (53,435.600) (54,450.241) (55,457.770) (56,466.649) (57,474.357) (58,474.701) (59,486.241) (60,481.493) (61,476.095) (62,490.031) (63,493.336) (64,488.217) (65,507.790) (66,530.756) (67,530.066) (68,542.710) (69,548.575) (70,547.919) (71,547.724) (72,560.199) (73,570.625) (74,576.416) (75,583.530) (76,602.368) (77,588.637) (78,609.556) (79,626.115) (80,645.292) (81,646.323) (82,673.114) (83,673.614) (84,684.064) (85,711.602) (86,712.993) (87,698.353) (88,719.220) (89,733.084) (90,749.741) (91,758.989) (92,754.648) (93,761.564) (94,766.104) (95,766.874) (96,766.168) (97,767.091) (98,765.510) (99,760.520) (100,755.600) (101,743.591) (102,735.189) (103,738.069) (104,698.049) (105,707.038) (106,705.347) (107,710.858) (108,725.571) (109,733.667) (110,748.754) (111,763.864) (112,782.347) (113,784.346) (114,783.949) (115,786.084) (116,769.845) (117,757.241) (118,758.689) (119,780.087) (120,790.574) (121,794.553) (122,789.168) (123,785.626) (124,801.399) (125,834.353) (126,830.163) (127,835.245) (128,844.738) (129,838.568) (130,843.300) (131,841.113) (132,843.465) (133,843.251) (134,843.979) (135,857.086) (136,860.097) (137,858.896) (138,860.310) (139,860.157) (140,856.539) (141,865.371) (142,847.100) (143,852.020) (144,858.522) (145,869.104) (146,861.599) (147,863.660) (148,871.655) (149,876.785) (150,880.982) (151,889.131) (152,888.791) (153,891.015) (154,892.395) (155,896.284) (156,891.023) (157,906.071) (158,915.598) (159,926.954) (160,921.298) (161,925.548) (162,918.790) (163,931.030) (164,932.846) (165,967.785) (166,968.342) (167,965.240) (168,955.169) (169,960.455) (170,955.717) (171,960.175) (172,968.620) (173,956.711) (174,931.031) (175,930.444) (176,928.056) (177,933.920) (178,956.847) (179,956.027) (180,957.110) (181,958.871)};
+\addplot[gray,dashed] coordinates {(0,-8.977) (1,-8.977) (2,-9.245) (3,-19.163) (4,-22.367) (5,-32.307) (6,-32.310) (7,-33.657) (8,-29.526) (9,-23.371) (10,-17.761) (11,-21.954) (12,-18.446) (13,15.084) (14,33.134) (15,45.252) (16,63.263) (17,74.696) (18,79.485) (19,77.656) (20,105.648) (21,119.061) (22,130.987) (23,128.375) (24,129.717) (25,142.934) (26,138.289) (27,137.023) (28,124.485) (29,156.138) (30,159.301) (31,167.182) (32,208.272) (33,212.095) (34,255.285) (35,272.105) (36,255.010) (37,265.610) (38,272.430) (39,246.527) (40,268.771) (41,281.803) (42,311.583) (43,316.140) (44,317.925) (45,344.232) (46,357.914) (47,356.834) (48,362.641) (49,382.332) (50,380.526) (51,372.301) (52,366.880) (53,372.035) (54,380.661) (55,389.003) (56,372.620) (57,380.222) (58,378.303) (59,390.773) (60,383.212) (61,373.854) (62,383.313) (63,385.144) (64,382.298) (65,411.278) (66,421.041) (67,421.151) (68,432.487) (69,436.859) (70,427.886) (71,432.943) (72,457.262) (73,469.798) (74,477.593) (75,476.882) (76,494.535) (77,481.552) (78,506.261) (79,495.852) (80,506.201) (81,496.143) (82,532.126) (83,532.626) (84,523.065) (85,563.457) (86,566.771) (87,550.222) (88,557.796) (89,564.852) (90,579.197) (91,583.096) (92,576.430) (93,588.613) (94,591.893) (95,595.903) (96,594.957) (97,595.781) (98,591.546) (99,588.774) (100,580.874) (101,569.304) (102,557.916) (103,542.007) (104,526.540) (105,533.646) (106,530.209) (107,532.273) (108,543.517) (109,540.136) (110,548.734) (111,566.300) (112,571.475) (113,575.125) (114,558.941) (115,557.567) (116,535.184) (117,520.621) (118,527.141) (119,538.102) (120,545.605) (121,547.119) (122,540.623) (123,536.546) (124,544.598) (125,561.724) (126,555.684) (127,564.816) (128,563.724) (129,552.500) (130,562.117) (131,562.750) (132,565.271) (133,565.265) (134,569.144) (135,561.172) (136,561.149) (137,555.691) (138,556.446) (139,554.501) (140,555.088) (141,556.077) (142,520.836) (143,525.948) (144,533.503) (145,542.092) (146,534.352) (147,532.038) (148,536.119) (149,543.854) (150,545.109) (151,551.290) (152,547.567) (153,548.488) (154,546.268) (155,552.310) (156,547.174) (157,579.538) (158,591.027) (159,589.013) (160,580.105) (161,582.715) (162,579.349) (163,589.344) (164,591.223) (165,617.381) (166,616.525) (167,614.909) (168,596.709) (169,598.488) (170,596.622) (171,599.312) (172,608.809) (173,598.584) (174,577.538) (175,577.755) (176,567.435) (177,575.997) (178,592.016) (179,595.845) (180,599.472) (181,603.279)};
+\addplot[prototypehazard,dotted,thick] coordinates {(0,-15.465) (1,-15.465) (2,-2.807) (3,-2.688) (4,-4.833) (5,-28.178) (6,-31.715) (7,-27.478) (8,-20.727) (9,-12.938) (10,-3.793) (11,-5.473) (12,-0.200) (13,6.772) (14,15.432) (15,35.965) (16,53.103) (17,59.715) (18,61.459) (19,65.264) (20,76.459) (21,86.979) (22,96.477) (23,90.251) (24,95.103) (25,106.558) (26,112.350) (27,120.111) (28,116.890) (29,124.778) (30,127.187) (31,133.380) (32,155.291) (33,160.930) (34,185.729) (35,193.993) (36,190.094) (37,195.594) (38,198.325) (39,191.338) (40,208.206) (41,217.894) (42,230.679) (43,236.765) (44,246.103) (45,251.274) (46,262.657) (47,263.457) (48,269.054) (49,277.133) (50,276.049) (51,281.654) (52,281.561) (53,286.940) (54,306.951) (55,311.736) (56,314.795) (57,317.483) (58,320.797) (59,330.338) (60,326.574) (61,321.932) (62,323.314) (63,332.748) (64,331.656) (65,337.249) (66,347.918) (67,348.718) (68,345.445) (69,346.080) (70,350.202) (71,357.739) (72,360.086) (73,363.663) (74,373.362) (75,376.171) (76,382.501) (77,370.423) (78,378.187) (79,364.832) (80,367.752) (81,362.066) (82,395.533) (83,395.533) (84,397.629) (85,393.928) (86,392.010) (87,386.959) (88,394.903) (89,402.985) (90,412.428) (91,417.207) (92,420.809) (93,428.210) (94,429.710) (95,429.419) (96,429.419) (97,429.719) (98,423.699) (99,423.534) (100,422.154) (101,424.687) (102,417.152) (103,406.745) (104,383.127) (105,391.144) (106,398.438) (107,399.655) (108,406.614) (109,406.103) (110,386.437) (111,397.894) (112,389.391) (113,391.913) (114,383.883) (115,387.001) (116,370.688) (117,369.828) (118,369.013) (119,367.908) (120,373.259) (121,377.186) (122,380.789) (123,384.347) (124,394.449) (125,396.509) (126,395.569) (127,402.409) (128,395.560) (129,390.059) (130,397.013) (131,397.963) (132,399.463) (133,398.178) (134,369.992) (135,368.182) (136,365.449) (137,362.977) (138,365.935) (139,363.075) (140,361.185) (141,357.111) (142,339.693) (143,337.960) (144,342.631) (145,346.804) (146,344.475) (147,344.006) (148,344.387) (149,346.014) (150,347.951) (151,349.961) (152,345.805) (153,349.995) (154,348.275) (155,350.400) (156,349.219) (157,344.812) (158,338.849) (159,341.679) (160,340.296) (161,341.116) (162,340.388) (163,342.995) (164,345.941) (165,359.098) (166,360.563) (167,360.486) (168,356.333) (169,353.832) (170,356.910) (171,345.775) (172,352.604) (173,318.324) (174,306.360) (175,306.460) (176,306.284) (177,315.375) (178,332.931) (179,337.097) (180,338.367) (181,341.361)};
+\nextgroupplot[title={B: Net P\&L by minute of the hour},xlabel={Minute (UTC)},ylabel={\$ per day},xmin=0,xmax=59]
+\addplot[prototypehazard,mark=*,mark size=0.6pt] coordinates {(0,-0.175) (1,0.087) (2,0.473) (3,0.525) (4,0.396) (5,0.258) (6,0.147) (7,-0.040) (8,-0.216) (9,-0.191) (10,0.323) (11,0.691) (12,0.433) (13,0.186) (14,0.074) (15,0.085) (16,-1.329) (17,-1.008) (18,0.186) (19,-0.151) (20,-0.129) (21,-0.166) (22,0.412) (23,0.420) (24,0.054) (25,0.028) (26,-0.117) (27,-0.311) (28,0.292) (29,0.236) (30,0.645) (31,-0.029) (32,0.067) (33,0.535) (34,0.002) (35,0.113) (36,0.362) (37,0.015) (38,-0.169) (39,-0.288) (40,-0.126) (41,0.057) (42,-0.068) (43,-0.485) (44,-0.019) (45,0.384) (46,0.451) (47,0.165) (48,-0.037) (49,0.464) (50,0.305) (51,0.085) (52,-0.769) (53,-2.268) (54,0.296) (55,-0.203) (56,0.375) (57,0.435) (58,0.182) (59,-0.074)};
+\addplot[gray,mark=*,mark size=0.6pt] coordinates {(0,-0.058) (1,-0.371) (2,1.118) (3,0.733) (4,0.393) (5,0.401) (6,0.189) (7,0.401) (8,-0.089) (9,-0.399) (10,0.205) (11,0.995) (12,0.877) (13,0.705) (14,-0.094) (15,0.290) (16,-1.517) (17,-1.011) (18,-0.104) (19,-0.281) (20,0.002) (21,0.057) (22,0.328) (23,0.429) (24,0.463) (25,-0.205) (26,-0.044) (27,-0.161) (28,0.111) (29,0.328) (30,0.777) (31,-0.337) (32,0.348) (33,0.910) (34,0.439) (35,0.707) (36,0.149) (37,-0.036) (38,-0.129) (39,-0.393) (40,0.064) (41,0.045) (42,-0.508) (43,-0.980) (44,-0.563) (45,0.058) (46,0.144) (47,-0.161) (48,0.228) (49,0.672) (50,0.197) (51,0.110) (52,-1.253) (53,-3.860) (54,0.247) (55,0.772) (56,0.441) (57,0.448) (58,0.646) (59,0.441)};
+\addplot[eventaware,thick,mark=*,mark size=0.6pt] coordinates {(0,-0.007) (1,0.122) (2,0.999) (3,0.778) (4,0.461) (5,0.331) (6,0.073) (7,0.189) (8,-0.145) (9,-0.604) (10,0.180) (11,1.041) (12,0.751) (13,0.703) (14,0.224) (15,0.460) (16,-0.657) (17,0.398) (18,0.015) (19,-0.310) (20,-0.265) (21,0.201) (22,0.191) (23,0.582) (24,0.599) (25,-0.216) (26,0.152) (27,0.015) (28,0.012) (29,0.116) (30,0.782) (31,-0.299) (32,0.424) (33,0.895) (34,0.351) (35,0.823) (36,0.110) (37,0.178) (38,-0.266) (39,-0.293) (40,0.196) (41,-0.196) (42,-0.453) (43,-0.979) (44,-0.977) (45,0.076) (46,0.108) (47,0.001) (48,-0.146) (49,0.670) (50,0.228) (51,0.106) (52,-0.052) (53,-0.146) (54,0.277) (55,1.218) (56,0.165) (57,0.508) (58,0.740) (59,0.590)};
+\nextgroupplot[title={C: Quoted spread around a report},xlabel={Minutes past 15:00 UTC ($p=0.3$, $q=0$)},
+ylabel={Ask $-$ bid (\$); gap = withdrawn},xmin=40,xmax=60,ymin=0.09,ymax=0.15,unbounded coords=jump]
+\fill[benchmark!15] (axis cs:51,0.09) rectangle (axis cs:54,0.15);
+\addplot[eventaware,thick,unbounded coords=jump] coordinates {(40,0.1000) (40.1,0.1000) (40.2,0.1000) (40.3,0.1000) (40.4,0.1000) (40.5,0.1000) (40.6,0.1000) (40.7,0.1000) (40.8,0.1000) (40.9,0.1000) (41,0.1000) (41.1,0.1000) (41.2,0.1000) (41.3,0.1000) (41.4,0.1000) (41.5,0.1000) (41.6,0.1000) (41.7,0.1000) (41.8,0.1000) (41.9,0.1000) (42,0.1000) (42.1,0.1000) (42.2,0.1000) (42.3,0.1000) (42.4,0.1000) (42.5,0.1000) (42.6,0.1000) (42.7,0.1000) (42.8,0.1000) (42.9,0.1000) (43,0.1000) (43.1,0.1000) (43.2,0.1000) (43.3,0.1000) (43.4,0.1000) (43.5,0.1000) (43.6,0.1000) (43.7,0.1000) (43.8,0.1000) (43.9,0.1000) (44,0.1000) (44.1,0.1000) (44.2,0.1000) (44.3,0.1000) (44.4,0.1000) (44.5,0.1000) (44.6,0.1000) (44.7,0.1000) (44.8,0.1000) (44.9,0.1000) (45,0.1000) (45.1,0.1000) (45.2,0.1000) (45.3,0.1000) (45.4,0.1000) (45.5,0.1000) (45.6,0.1000) (45.7,0.1000) (45.8,0.1000) (45.9,0.1000) (46,0.1000) (46.1,0.1000) (46.2,0.1000) (46.3,0.1000) (46.4,0.1000) (46.5,0.1000) (46.6,0.1000) (46.7,0.1000) (46.8,0.1000) (46.9,0.1000) (47,0.1000) (47.1,0.1000) (47.2,0.1000) (47.3,0.1000) (47.4,0.1000) (47.5,0.1000) (47.6,0.1000) (47.7,0.1000) (47.8,0.1000) (47.9,0.1000) (48,0.1000) (48.1,0.1000) (48.2,0.1000) (48.3,0.1000) (48.4,0.1000) (48.5,0.1000) (48.6,0.1000) (48.7,0.1000) (48.8,0.1000) (48.9,0.1000) (49,0.1000) (49.1,0.1000) (49.2,0.1000) (49.3,0.1000) (49.4,0.1000) (49.5,0.1000) (49.6,0.1000) (49.7,0.1000) (49.8,0.1000) (49.9,0.1000) (50,0.1000) (50.1,0.1000) (50.2,0.1000) (50.3,0.1000) (50.4,0.1050) (50.5,0.1100) (50.6,0.1100) (50.7,0.1150) (50.8,0.1150) (50.9,0.1200) (51,0.1350) (51.1,nan) (51.2,nan) (51.3,nan) (51.4,nan) (51.5,nan) (51.6,nan) (51.7,nan) (51.8,nan) (51.9,nan) (52,nan) (52.1,nan) (52.2,nan) (52.3,nan) (52.4,nan) (52.5,nan) (52.6,nan) (52.7,nan) (52.8,nan) (52.9,nan) (53,nan) (53.1,nan) (53.2,nan) (53.3,nan) (53.4,nan) (53.5,nan) (53.6,nan) (53.7,nan) (53.8,nan) (53.9,nan) (54,nan) (54.1,0.1300) (54.2,0.1200) (54.3,0.1150) (54.4,0.1100) (54.5,0.1050) (54.6,0.1000) (54.7,0.1000) (54.8,0.1000) (54.9,0.1000) (55,0.1000) (55.1,0.1000) (55.2,0.1000) (55.3,0.1000) (55.4,0.1000) (55.5,0.1000) (55.6,0.1000) (55.7,0.1000) (55.8,0.1000) (55.9,0.1000) (56,0.1000) (56.1,0.1000) (56.2,0.1000) (56.3,0.1000) (56.4,0.1000) (56.5,0.1000) (56.6,0.1000) (56.7,0.1000) (56.8,0.1000) (56.9,0.1000) (57,0.1000) (57.1,0.1000) (57.2,0.1000) (57.3,0.1000) (57.4,0.1000) (57.5,0.1000) (57.6,0.1000) (57.7,0.1000) (57.8,0.1000) (57.9,0.1000) (58,0.1000) (58.1,0.1000) (58.2,0.1000) (58.3,0.1000) (58.4,0.1000) (58.5,0.1000) (58.6,0.1000) (58.7,0.1000) (58.8,0.1000) (58.9,0.1000) (59,0.1000) (59.1,0.1000) (59.2,0.1000) (59.3,0.1000) (59.4,0.1000) (59.5,0.1000) (59.6,0.1000) (59.7,0.1000) (59.8,0.1000) (59.9,0.1000) (60,0.1000)};
+\addplot[prototypeoriginal,dashed] coordinates {(40,0.1050) (40.1,0.1050) (40.2,0.1050) (40.3,0.1050) (40.4,0.1050) (40.5,0.1050) (40.6,0.1050) (40.7,0.1050) (40.8,0.1050) (40.9,0.1050) (41,0.1050) (41.1,0.1050) (41.2,0.1050) (41.3,0.1050) (41.4,0.1050) (41.5,0.1050) (41.6,0.1050) (41.7,0.1050) (41.8,0.1050) (41.9,0.1000) (42,0.1000) (42.1,0.1000) (42.2,0.1000) (42.3,0.1000) (42.4,0.1000) (42.5,0.1000) (42.6,0.1000) (42.7,0.1000) (42.8,0.1000) (42.9,0.1000) (43,0.1000) (43.1,0.1000) (43.2,0.1000) (43.3,0.1000) (43.4,0.1000) (43.5,0.1000) (43.6,0.1000) (43.7,0.1000) (43.8,0.1000) (43.9,0.1000) (44,0.1000) (44.1,0.1000) (44.2,0.1000) (44.3,0.1000) (44.4,0.1000) (44.5,0.1000) (44.6,0.1000) (44.7,0.1000) (44.8,0.1000) (44.9,0.1000) (45,0.1000) (45.1,0.1000) (45.2,0.1000) (45.3,0.1000) (45.4,0.1000) (45.5,0.1000) (45.6,0.1000) (45.7,0.1000) (45.8,0.1000) (45.9,0.1000) (46,0.1000) (46.1,0.1000) (46.2,0.1000) (46.3,0.1000) (46.4,0.1000) (46.5,0.1000) (46.6,0.1000) (46.7,0.1000) (46.8,0.1000) (46.9,0.1000) (47,0.1000) (47.1,0.1000) (47.2,0.1000) (47.3,0.1000) (47.4,0.1000) (47.5,0.1000) (47.6,0.1000) (47.7,0.1000) (47.8,0.1000) (47.9,0.1000) (48,0.1000) (48.1,0.1000) (48.2,0.1000) (48.3,0.1000) (48.4,0.1000) (48.5,0.1000) (48.6,0.1000) (48.7,0.1000) (48.8,0.1000) (48.9,0.1000) (49,0.1000) (49.1,0.1000) (49.2,0.1000) (49.3,0.1000) (49.4,0.1000) (49.5,0.1000) (49.6,0.1000) (49.7,0.1000) (49.8,0.1000) (49.9,0.1000) (50,0.1000) (50.1,0.1000) (50.2,0.1000) (50.3,0.1000) (50.4,0.1100) (50.5,0.1100) (50.6,0.1150) (50.7,0.1250) (50.8,0.1448) (50.9,0.1448) (51,0.1448) (51.1,0.1448) (51.2,0.1448) (51.3,0.1448) (51.4,0.1448) (51.5,0.1448) (51.6,0.1448) (51.7,0.1448) (51.8,0.1448) (51.9,0.1448) (52,0.1448) (52.1,0.1448) (52.2,0.1448) (52.3,0.1448) (52.4,0.1448) (52.5,0.1448) (52.6,0.1448) (52.7,0.1448) (52.8,0.1448) (52.9,0.1448) (53,0.1448) (53.1,0.1448) (53.2,0.1448) (53.3,0.1448) (53.4,0.1448) (53.5,0.1448) (53.6,0.1448) (53.7,0.1448) (53.8,0.1448) (53.9,0.1448) (54,0.1448) (54.1,0.1448) (54.2,0.1448) (54.3,0.1448) (54.4,0.1448) (54.5,0.1150) (54.6,0.1100) (54.7,0.1100) (54.8,0.1050) (54.9,0.1050) (55,0.1050) (55.1,0.1050) (55.2,0.1050) (55.3,0.1050) (55.4,0.1050) (55.5,0.1050) (55.6,0.1050) (55.7,0.1050) (55.8,0.1050) (55.9,0.1050) (56,0.1050) (56.1,0.1050) (56.2,0.1050) (56.3,0.1050) (56.4,0.1050) (56.5,0.1050) (56.6,0.1050) (56.7,0.1050) (56.8,0.1050) (56.9,0.1050) (57,0.1050) (57.1,0.1050) (57.2,0.1050) (57.3,0.1050) (57.4,0.1050) (57.5,0.1050) (57.6,0.1050) (57.7,0.1050) (57.8,0.1050) (57.9,0.1050) (58,0.1050) (58.1,0.1050) (58.2,0.1050) (58.3,0.1050) (58.4,0.1050) (58.5,0.1050) (58.6,0.1050) (58.7,0.1050) (58.8,0.1050) (58.9,0.1050) (59,0.1050) (59.1,0.1050) (59.2,0.1050) (59.3,0.1050) (59.4,0.1050) (59.5,0.1050) (59.6,0.1050) (59.7,0.1050) (59.8,0.1050) (59.9,0.1050) (60,0.1050)};
+\addplot[gray,dotted,thick] coordinates {(40,0.1000) (40.1,0.1000) (40.2,0.1000) (40.3,0.1000) (40.4,0.1000) (40.5,0.1000) (40.6,0.1000) (40.7,0.1000) (40.8,0.1000) (40.9,0.1000) (41,0.1000) (41.1,0.1000) (41.2,0.1000) (41.3,0.1000) (41.4,0.1000) (41.5,0.1000) (41.6,0.1000) (41.7,0.1000) (41.8,0.1000) (41.9,0.1000) (42,0.1000) (42.1,0.1000) (42.2,0.1000) (42.3,0.1000) (42.4,0.1000) (42.5,0.1000) (42.6,0.1000) (42.7,0.1000) (42.8,0.1000) (42.9,0.1000) (43,0.1000) (43.1,0.1000) (43.2,0.1000) (43.3,0.1000) (43.4,0.1000) (43.5,0.1000) (43.6,0.1000) (43.7,0.1000) (43.8,0.1000) (43.9,0.1000) (44,0.1000) (44.1,0.1000) (44.2,0.1000) (44.3,0.1000) (44.4,0.1000) (44.5,0.1000) (44.6,0.1000) (44.7,0.1000) (44.8,0.1000) (44.9,0.1000) (45,0.1000) (45.1,0.1000) (45.2,0.1000) (45.3,0.1000) (45.4,0.1000) (45.5,0.1000) (45.6,0.1000) (45.7,0.1000) (45.8,0.1000) (45.9,0.1000) (46,0.1000) (46.1,0.1000) (46.2,0.1000) (46.3,0.1000) (46.4,0.1000) (46.5,0.1000) (46.6,0.1000) (46.7,0.1000) (46.8,0.1000) (46.9,0.1000) (47,0.1000) (47.1,0.1000) (47.2,0.1000) (47.3,0.1000) (47.4,0.1000) (47.5,0.1000) (47.6,0.1000) (47.7,0.1000) (47.8,0.1000) (47.9,0.1000) (48,0.1000) (48.1,0.1000) (48.2,0.1000) (48.3,0.1000) (48.4,0.1000) (48.5,0.1000) (48.6,0.1000) (48.7,0.1000) (48.8,0.1000) (48.9,0.1000) (49,0.1000) (49.1,0.1000) (49.2,0.1000) (49.3,0.1000) (49.4,0.1000) (49.5,0.1000) (49.6,0.1000) (49.7,0.1000) (49.8,0.1000) (49.9,0.1000) (50,0.1000) (50.1,0.1000) (50.2,0.1000) (50.3,0.1000) (50.4,0.1000) (50.5,0.1000) (50.6,0.1000) (50.7,0.1000) (50.8,0.1000) (50.9,0.1000) (51,0.1000) (51.1,0.1000) (51.2,0.1000) (51.3,0.1000) (51.4,0.1000) (51.5,0.1000) (51.6,0.1000) (51.7,0.1000) (51.8,0.1000) (51.9,0.1000) (52,0.1000) (52.1,0.1000) (52.2,0.1000) (52.3,0.1000) (52.4,0.1000) (52.5,0.1000) (52.6,0.1000) (52.7,0.1000) (52.8,0.1000) (52.9,0.1000) (53,0.1000) (53.1,0.1000) (53.2,0.1000) (53.3,0.1000) (53.4,0.1000) (53.5,0.1000) (53.6,0.1000) (53.7,0.1000) (53.8,0.1000) (53.9,0.1000) (54,0.1000) (54.1,0.1000) (54.2,0.1000) (54.3,0.1000) (54.4,0.1000) (54.5,0.1000) (54.6,0.1000) (54.7,0.1000) (54.8,0.1000) (54.9,0.1000) (55,0.1000) (55.1,0.1000) (55.2,0.1000) (55.3,0.1000) (55.4,0.1000) (55.5,0.1000) (55.6,0.1000) (55.7,0.1000) (55.8,0.1000) (55.9,0.1000) (56,0.1000) (56.1,0.1000) (56.2,0.1000) (56.3,0.1000) (56.4,0.1000) (56.5,0.1000) (56.6,0.1000) (56.7,0.1000) (56.8,0.1000) (56.9,0.1000) (57,0.1000) (57.1,0.1000) (57.2,0.1000) (57.3,0.1000) (57.4,0.1000) (57.5,0.1000) (57.6,0.1000) (57.7,0.1000) (57.8,0.1000) (57.9,0.1000) (58,0.1000) (58.1,0.1000) (58.2,0.1000) (58.3,0.1000) (58.4,0.1000) (58.5,0.1000) (58.6,0.1000) (58.7,0.1000) (58.8,0.1000) (58.9,0.1000) (59,0.1000) (59.1,0.1000) (59.2,0.1000) (59.3,0.1000) (59.4,0.1000) (59.5,0.1000) (59.6,0.1000) (59.7,0.1000) (59.8,0.1000) (59.9,0.1000) (60,0.1000)};
+\nextgroupplot[title={D: Daily P\&L distribution},xlabel={\$ per day},ylabel={Cumulative share of days},ymin=0,ymax=1]
+\addplot[eventaware,thick,const plot] coordinates {(-18.19,0.005) (-14.69,0.011) (-13.39,0.016) (-12.8,0.022) (-12.37,0.027) (-9.71,0.033) (-9.58,0.038) (-8.69,0.044) (-8.47,0.049) (-7.85,0.055) (-6.65,0.060) (-6.24,0.066) (-5.56,0.071) (-5.45,0.077) (-4.92,0.082) (-3.1,0.088) (-1.28,0.093) (-1.18,0.099) (-1.01,0.104) (-0.95,0.110) (-0.51,0.115) (-0.24,0.121) (-0.22,0.126) (0,0.132) (0.11,0.137) (0.2,0.143) (0.3,0.148) (0.37,0.154) (0.38,0.159) (0.74,0.165) (0.75,0.170) (0.77,0.176) (0.78,0.181) (0.92,0.187) (0.96,0.192) (1.02,0.198) (1.34,0.203) (1.45,0.209) (1.45,0.214) (1.55,0.220) (1.67,0.225) (2.04,0.231) (2.06,0.236) (2.13,0.242) (2.22,0.247) (2.25,0.253) (2.49,0.258) (3.24,0.264) (3.34,0.269) (3.34,0.275) (3.41,0.280) (3.76,0.286) (3.96,0.291) (3.96,0.297) (4.03,0.302) (4.05,0.308) (4.11,0.313) (4.31,0.319) (4.73,0.324) (4.73,0.330) (4.77,0.335) (4.87,0.341) (5.07,0.346) (5.35,0.352) (5.48,0.357) (5.67,0.363) (5.74,0.368) (5.77,0.374) (5.8,0.379) (5.82,0.385) (5.96,0.390) (6.2,0.396) (6.42,0.401) (6.56,0.407) (6.69,0.412) (6.82,0.418) (6.92,0.423) (7.11,0.429) (7.24,0.434) (7.26,0.440) (7.4,0.445) (7.44,0.451) (7.55,0.456) (7.69,0.462) (7.72,0.467) (7.77,0.473) (7.95,0.478) (8.2,0.484) (8.3,0.489) (8.42,0.495) (8.75,0.500) (8.8,0.505) (8.95,0.511) (9.35,0.516) (9.68,0.522) (9.76,0.527) (9.85,0.533) (10.12,0.538) (10.12,0.544) (10.18,0.549) (10.44,0.555) (10.51,0.560) (10.59,0.566) (10.65,0.571) (10.75,0.577) (11.15,0.582) (11.18,0.588) (11.4,0.593) (11.51,0.599) (11.59,0.604) (11.62,0.610) (11.64,0.615) (11.7,0.621) (11.99,0.626) (12.31,0.632) (12.39,0.637) (12.53,0.643) (12.61,0.648) (12.64,0.654) (12.81,0.659) (12.88,0.665) (12.95,0.670) (13.18,0.676) (13.28,0.681) (13.35,0.687) (13.89,0.692) (14.23,0.698) (14.35,0.703) (14.77,0.709) (15.61,0.714) (15.69,0.720) (15.88,0.725) (16.48,0.731) (16.48,0.736) (16.87,0.742) (17.21,0.747) (17.47,0.753) (17.76,0.758) (17.9,0.764) (18.07,0.769) (18.32,0.775) (18.59,0.780) (18.67,0.786) (19.86,0.791) (19.99,0.797) (20.61,0.802) (20.63,0.808) (20.86,0.813) (20.98,0.819) (21.01,0.824) (21.31,0.830) (21.8,0.835) (21.95,0.841) (22.92,0.846) (23.16,0.852) (25.57,0.857) (25.69,0.863) (26.49,0.868) (27.32,0.874) (27.34,0.879) (28.13,0.885) (28.73,0.890) (29.57,0.896) (30.3,0.901) (30.76,0.907) (31.95,0.912) (33.72,0.918) (34.1,0.923) (34.52,0.929) (37.15,0.934) (37.38,0.940) (37.67,0.945) (37.67,0.951) (38.4,0.956) (38.64,0.962) (38.78,0.967) (40.67,0.973) (40.79,0.978) (41.02,0.984) (43.26,0.989) (43.83,0.995) (45.26,1.000)};
+\addplot[benchmark,thick,const plot] coordinates {(-19.05,0.005) (-11.78,0.011) (-8.6,0.016) (-6.92,0.022) (-5.05,0.027) (-4.34,0.033) (-3.75,0.038) (-3.55,0.044) (-2.69,0.049) (-2.13,0.055) (-1.96,0.060) (-1.73,0.066) (-1.72,0.071) (-1.44,0.077) (-1.35,0.082) (-1.32,0.088) (-0.32,0.093) (-0.32,0.099) (-0.17,0.104) (-0.16,0.110) (-0.13,0.115) (-0.02,0.121) (0,0.126) (0,0.132) (0,0.137) (0.06,0.143) (0.09,0.148) (0.2,0.154) (0.3,0.159) (0.3,0.165) (0.78,0.170) (0.8,0.176) (0.9,0.181) (1.01,0.187) (1.05,0.192) (1.08,0.198) (1.1,0.203) (1.15,0.209) (1.27,0.214) (1.49,0.220) (1.5,0.225) (1.5,0.231) (1.61,0.236) (1.65,0.242) (1.7,0.247) (1.78,0.253) (1.83,0.258) (1.83,0.264) (1.85,0.269) (1.92,0.275) (2.02,0.280) (2.1,0.286) (2.24,0.291) (2.26,0.297) (2.31,0.302) (2.42,0.308) (2.45,0.313) (2.54,0.319) (2.71,0.324) (2.75,0.330) (2.82,0.335) (2.9,0.341) (2.92,0.346) (2.97,0.352) (3.19,0.357) (3.36,0.363) (3.36,0.368) (3.7,0.374) (3.84,0.379) (3.88,0.385) (3.89,0.390) (3.9,0.396) (4.07,0.401) (4.27,0.407) (4.28,0.412) (4.4,0.418) (4.43,0.423) (4.6,0.429) (4.7,0.434) (4.81,0.440) (4.84,0.445) (4.84,0.451) (4.86,0.456) (4.9,0.462) (4.91,0.467) (5.07,0.473) (5.1,0.478) (5.15,0.484) (5.18,0.489) (5.6,0.495) (5.67,0.500) (5.83,0.505) (5.88,0.511) (5.88,0.516) (5.94,0.522) (6.13,0.527) (6.15,0.533) (6.16,0.538) (6.4,0.544) (6.45,0.549) (6.77,0.555) (6.87,0.560) (7.06,0.566) (7.16,0.571) (7.21,0.577) (7.26,0.582) (7.27,0.588) (7.3,0.593) (7.62,0.599) (7.7,0.604) (7.74,0.610) (7.81,0.615) (7.84,0.621) (7.87,0.626) (8,0.632) (8.05,0.637) (8.05,0.643) (8.36,0.648) (8.4,0.654) (8.54,0.659) (8.57,0.665) (8.61,0.670) (8.63,0.676) (8.77,0.681) (8.77,0.687) (8.9,0.692) (9.38,0.698) (9.38,0.703) (9.38,0.709) (9.67,0.714) (9.94,0.720) (9.98,0.725) (10.22,0.731) (10.32,0.736) (10.41,0.742) (10.47,0.747) (10.64,0.753) (10.8,0.758) (10.94,0.764) (11.17,0.769) (11.2,0.775) (11.21,0.780) (11.26,0.786) (11.33,0.791) (11.8,0.797) (11.88,0.802) (11.94,0.808) (12.5,0.813) (12.57,0.819) (12.72,0.824) (12.75,0.830) (12.89,0.835) (13.34,0.841) (13.86,0.846) (14.11,0.852) (14.65,0.857) (14.92,0.863) (14.95,0.868) (15.27,0.874) (15.6,0.879) (15.97,0.885) (16.33,0.890) (16.66,0.896) (16.73,0.901) (16.94,0.907) (16.97,0.912) (17.01,0.918) (17.5,0.923) (17.57,0.929) (17.74,0.934) (17.78,0.940) (18.66,0.945) (18.88,0.951) (19.58,0.956) (19.9,0.962) (21.51,0.967) (21.72,0.973) (23.07,0.978) (24.8,0.984) (26.47,0.989) (27.21,0.995) (30.97,1.000)};
+\end{groupplot}\end{tikzpicture}
+\caption{Out-of-sample replay, April--September 2026. Panel B sums each fill's
+settlement P\&L by the minute of the hour in which it was quoted; the hourly
+report is issued at minute 51. Panel C is a policy slice at fixed probability and
+inventory; the shaded band is the reference strategy's hard calendar, during
+which it posts nothing, and gaps in the event-aware line are withdrawal.}
+\label{fig:weather}
+\end{figure}
+
+\subsection{Between reports}
+Outside the report windows the event-aware and diffusion controllers quote
+almost identically, so the gap between our controllers and the reference strategy
+in Table~\ref{tab:weather} (\$9.70 against \$6.65 with the same calendar) is a
+difference in ordinary quoting, not in event handling. Their quote adds a
+fitted adverse-selection term to the exponential-intensity optimum and couples
+bins through the settlement covariance. Removing either does not close the gap:
+with the adverse term at zero they trade as much as we do (919 against 979
+contracts a day) but earn \$6.35 a day; without the cross-bin terms, \$6.85.
+At comparable volume our fills capture about 0.45 cents more edge per contract.
+Candidate explanations, not yet separated, are price rounding (we always round
+away from fair value), the inventory penalty (our $\gamma$ is chosen on the
+calibration period), and their adjustment of the fill rate for adverse selection.
+
+\subsection{Limitations}
+The replay has no historical order books. It cannot see the queue ahead of a
+quote at its price, other makers' reaction to our quotes, or depth beyond the
+trade tape, and quotes are formed from one-minute data. These limits apply equally
+to every row of Table~\ref{tab:weather}, so the comparisons between controllers
+are better supported than the absolute dollar figures. Capacity is small: 10-contract
+quotes take under 1\% of the series' volume. One series and one six-month test
+period are reported; other cities have different stations, report minutes and
+participants. The hazard bumps are placed from the published schedule, not
+estimated; their width and mass are not tuned. A live test with recorded books
+is the next step.
+
+\clearpage
+\section{Empirical application: election night 2024}
+\label{sec:election}
+\subsection{When information arrived}
+We replay Kalshi's 2024 state-level presidential, Senate and governor markets
+from public 1-minute candles and trades. Poll-closing times are published, but
+they fix only when a race starts to move, not when its information arrives. Across
+79 races, the 15 minutes around a state's own poll close carry 3.5\% of the night's
+price variance; two thirds arrives more than 30 minutes after close, as counties
+report. For competitive races, half of the post-close information had arrived a
+median 135 minutes after close (interquartile range 94--174), about 100 minutes in
+states that count quickly and 160 in states that count slowly. Moves are common
+across races: minutes in which the presidential market or at least three other
+races moved by 2--3 cents are 9\% of the night and carry a median 49\% of a race's
+variance, so a race's risk depends on the national timeline (7--11 p.m.\ ET), not
+only its own close. Large moves show no clustering by minute of the hour. The
+event is therefore a hazard plateau after each close plus a common shock, not the
+scheduled atoms of Section~\ref{sec:weather}.
+
+\subsection{Adaptation and calibration}
+Each of the 40 most-traded races is a binary contract with its own inventory
+($\pm5$ lots of 10). Only poll closings are treated as scheduled: each race has one
+anticipated event at its published closing time, a Gaussian hazard bump of
+standard deviation 5 minutes and integrated hazard 3, centred 2 minutes after the
+close (chosen in advance, not tuned). Everything after the close---vote counts,
+race calls, national waves---is not predictable for the maker and enters as
+unscheduled news at a constant rate $\lambda_u$. All parameters come from
+October 21--November 1, 2024, before the election: the fill curve
+$Ae^{-k\delta}$ ($1/k\approx2.3$ cents), the diffusion scale, $\lambda_u$ (83 moves of at
+least 2 cents in 657{,}102 market-minutes, $1.3\times10^{-4}$ per minute), the mixture
+weights of those moves, and the persistence \eqref{eq:persist} at $H=60$ minutes,
+pooled $\hat\varphi=0.57$. On the night itself the slope is 0.6 for jumps of 2--5
+cents and 0.85--0.95 for 5--12 cents (Figure~\ref{fig:election}B), so the
+pre-election estimate is in the right range. The diffusion benchmark is the same
+solve with no event terms. Both controllers may withdraw. They are replayed from
+November 2 to noon ET on November 6 against the public trades, with quotes formed
+from the previous minute's candle, and flattened at the end with the taker fee.
+
+\subsection{Results}
+\begin{table}[htbp]
+\centering\small
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+Controller & base & beyond market & $\ge$2c through & 25\% of fills & 2-min quotes & contracts & peak capital\\
+\midrule
+Diffusion benchmark & +498 & +146 & +103 & +393 & +468 & 52,407 & \$903\\
+Event-aware, $\varphi=1$ & +521 & +263 & +254 & +429 & +492 & 26,346 & \$696\\
+\textbf{Event-aware, $\hat\varphi=0.57$} & \textbf{+631} & \textbf{+288} & \textbf{+231} & \textbf{+503} & \textbf{+565} & 38,180 & \$772\\
+\bottomrule
+\end{tabular}}
+\caption{2024 election, 40 races, November 2 to November 6 noon ET, net dollars after
+flattening, under five fill assumptions: a trade through our quote fills us in full
+when it also trades through the market's quote and a quarter when only through our
+improved quote (base); only the former (beyond market); only trades at least 2 cents
+through our price; a quarter of every fill; quotes from the candle two minutes old.
+Peak capital is Kalshi collateral (resting orders and positions, netted per market).
+The event-aware rows treat poll closings as the only scheduled events; every parameter is
+fitted before the election.}
+\label{tab:election}
+\end{table}
+
+Stepping aside at each race's poll close is worth having on its own: with
+$\varphi=1$ the event-aware controller earns slightly more than the diffusion benchmark
+at base and about twice as much under the two assumptions that remove fills inside
+the spread---the least certain part of the replay---because it avoids the stale fills
+at the closing moment itself. With the pre-election $\hat\varphi=0.57$ it also stays in
+the market through the night's partly reverting moves and earns the most under four of
+the five assumptions, with less capital than the benchmark. Nearly
+all of the P\&L is made after polls close (Figure~\ref{fig:election}A). For comparison, a
+controller given the night's own post-close hazard and kernel (in sample) earns
+\$521 at base and \$376 and \$287 under the two strict assumptions: knowing when the
+counts would arrive helps only where fills are scarce, and the pre-registered
+version gives up little for not knowing it.
+
+\begin{figure}[htbp]
+\centering
+{\footnotesize
+\textcolor{benchmark}{\rule{12pt}{1pt}} Diffusion benchmark\quad
+\textcolor{prototypeoriginal}{\rule{12pt}{1pt}} Event-aware, $\varphi=1$\quad
+\textcolor{eventaware}{\rule{12pt}{1pt}} Event-aware, $\hat\varphi=0.57$}\par\medskip
+\begin{tikzpicture}
+\begin{groupplot}[group style={group size=2 by 1,horizontal sep=1.5cm},
+width=0.47\linewidth,height=0.36\linewidth,
+label style={font=\scriptsize},tick label style={font=\scriptsize},
+title style={font=\small},axis lines=left,ymajorgrids,grid style={gray!20}]
+\nextgroupplot[title={A: Marked P\&L, 40 races},xlabel={Days from Nov 2, 00:00 ET},ylabel={\$},xmin=0,xmax=4.5]
+\fill[prototypehazard!15] (axis cs:3.79,-50) rectangle (axis cs:4.04,700);
+\addplot[benchmark,thick] coordinates {(0.000,0.0) (0.021,0.0) (0.042,0.0) (0.062,0.0) (0.083,-1.0) (0.104,-3.6) (0.125,-3.6) (0.146,-3.6) (0.167,-3.6) (0.188,-3.6) (0.208,-3.6) (0.229,-3.6) (0.250,-3.6) (0.271,-3.6) (0.292,-3.6) (0.312,-17.3) (0.333,-19.3) (0.354,-17.0) (0.375,-17.3) (0.396,-18.2) (0.417,-19.5) (0.438,-19.6) (0.458,-19.3) (0.479,-19.4) (0.500,-19.5) (0.521,-19.4) (0.542,-19.4) (0.562,-19.4) (0.583,-19.4) (0.604,-19.1) (0.625,-19.1) (0.646,-19.0) (0.667,-19.0) (0.688,-19.0) (0.708,-19.1) (0.729,-18.9) (0.750,-18.9) (0.771,-17.1) (0.792,-12.7) (0.812,-10.8) (0.833,-9.0) (0.854,-8.5) (0.875,-9.4) (0.896,-9.9) (0.917,-9.1) (0.938,-8.4) (0.958,-8.0) (0.979,-7.6) (1.000,-7.6) (1.021,-7.6) (1.042,-7.6) (1.062,-7.5) (1.083,-7.2) (1.104,-7.2) (1.125,-7.4) (1.146,-7.3) (1.167,-7.3) (1.188,-7.3) (1.208,-7.3) (1.229,-7.3) (1.250,-7.3) (1.271,-7.3) (1.292,-7.4) (1.312,-8.5) (1.333,-8.5) (1.354,-7.1) (1.375,-6.6) (1.396,-5.0) (1.417,-5.2) (1.438,-5.2) (1.458,-5.5) (1.479,-5.1) (1.500,-4.6) (1.521,-4.7) (1.542,-4.5) (1.562,-4.4) (1.583,-4.8) (1.604,-5.2) (1.625,-4.8) (1.646,-4.8) (1.667,-4.8) (1.688,-4.7) (1.708,-4.6) (1.729,-4.0) (1.750,-3.6) (1.771,-3.9) (1.792,-3.9) (1.812,-4.3) (1.833,-3.9) (1.854,-4.3) (1.875,-4.4) (1.896,-4.4) (1.917,-3.4) (1.938,-3.8) (1.958,-3.6) (1.979,-3.5) (2.000,-3.7) (2.021,-3.7) (2.042,-3.7) (2.062,-3.8) (2.083,-3.7) (2.104,-3.0) (2.125,-3.0) (2.146,-2.9) (2.167,-2.9) (2.188,-3.0) (2.208,-3.2) (2.229,-3.2) (2.250,-3.2) (2.271,-2.7) (2.292,-2.9) (2.312,-2.7) (2.333,-2.4) (2.354,-1.8) (2.375,-1.1) (2.396,-2.0) (2.417,-2.2) (2.438,-2.3) (2.458,-2.5) (2.479,-2.1) (2.500,-2.0) (2.521,-2.1) (2.542,-2.1) (2.562,-1.9) (2.583,-1.6) (2.604,0.9) (2.625,1.2) (2.646,1.2) (2.667,0.7) (2.688,1.4) (2.708,1.6) (2.729,1.6) (2.750,2.7) (2.771,2.2) (2.792,2.0) (2.812,2.4) (2.833,2.2) (2.854,2.0) (2.875,2.5) (2.896,4.6) (2.917,5.7) (2.938,5.6) (2.958,5.4) (2.979,5.7) (3.000,6.1) (3.021,5.6) (3.042,5.8) (3.062,7.8) (3.083,8.1) (3.104,8.2) (3.125,8.2) (3.146,8.1) (3.167,8.2) (3.188,8.1) (3.208,8.2) (3.229,8.2) (3.250,8.4) (3.271,8.2) (3.292,8.3) (3.312,8.6) (3.333,8.7) (3.354,9.6) (3.375,9.6) (3.396,9.7) (3.417,9.8) (3.438,9.6) (3.458,10.5) (3.479,10.8) (3.500,10.6) (3.521,9.7) (3.542,9.5) (3.562,9.2) (3.583,9.8) (3.604,10.9) (3.625,11.6) (3.646,11.9) (3.667,12.1) (3.688,12.1) (3.708,11.5) (3.729,13.5) (3.750,16.2) (3.771,22.2) (3.792,36.6) (3.812,54.5) (3.833,81.2) (3.854,119.9) (3.875,186.0) (3.896,241.4) (3.917,278.9) (3.938,328.7) (3.958,365.0) (3.979,387.7) (4.000,425.6) (4.021,525.2) (4.042,499.2) (4.062,448.6) (4.083,432.5) (4.104,408.3) (4.125,447.2) (4.146,453.0) (4.167,489.6) (4.188,487.6) (4.208,458.2) (4.229,491.3) (4.250,482.5) (4.271,454.9) (4.292,456.1) (4.312,419.9) (4.333,464.4) (4.354,441.2) (4.375,410.7) (4.396,457.4) (4.417,471.5) (4.438,507.8) (4.458,491.4) (4.479,512.4) (4.500,513.1)};
+\addplot[prototypeoriginal,thick] coordinates {(0.000,0.0) (0.021,0.0) (0.042,0.0) (0.062,0.0) (0.083,0.0) (0.104,0.0) (0.125,0.0) (0.146,0.0) (0.167,0.0) (0.188,0.0) (0.208,0.0) (0.229,0.0) (0.250,0.0) (0.271,0.0) (0.292,0.0) (0.312,-17.7) (0.333,-19.5) (0.354,-17.2) (0.375,-17.5) (0.396,-18.4) (0.417,-19.5) (0.438,-19.5) (0.458,-19.3) (0.479,-19.3) (0.500,-19.4) (0.521,-19.4) (0.542,-19.4) (0.562,-19.4) (0.583,-19.4) (0.604,-19.2) (0.625,-19.2) (0.646,-19.2) (0.667,-19.1) (0.688,-19.2) (0.708,-19.1) (0.729,-19.2) (0.750,-19.2) (0.771,-13.6) (0.792,-11.2) (0.812,-11.1) (0.833,-10.2) (0.854,-10.1) (0.875,-10.5) (0.896,-10.9) (0.917,-9.4) (0.938,-8.9) (0.958,-9.0) (0.979,-8.8) (1.000,-9.0) (1.021,-9.0) (1.042,-9.0) (1.062,-9.1) (1.083,-8.9) (1.104,-8.9) (1.125,-9.0) (1.146,-9.0) (1.167,-9.0) (1.188,-9.0) (1.208,-9.0) (1.229,-9.0) (1.250,-9.0) (1.271,-9.0) (1.292,-9.0) (1.312,-8.9) (1.333,-8.9) (1.354,-8.6) (1.375,-8.5) (1.396,10.2) (1.417,9.9) (1.438,9.9) (1.458,9.5) (1.479,9.8) (1.500,10.1) (1.521,10.1) (1.542,10.3) (1.562,10.3) (1.583,10.2) (1.604,9.8) (1.625,10.1) (1.646,10.2) (1.667,10.0) (1.688,10.0) (1.708,10.2) (1.729,10.2) (1.750,10.5) (1.771,10.4) (1.792,10.3) (1.812,10.0) (1.833,10.2) (1.854,10.0) (1.875,9.9) (1.896,9.9) (1.917,10.8) (1.938,10.6) (1.958,10.7) (1.979,10.7) (2.000,10.6) (2.021,10.6) (2.042,10.6) (2.062,10.5) (2.083,10.6) (2.104,10.9) (2.125,11.0) (2.146,11.2) (2.167,11.2) (2.188,11.1) (2.208,11.1) (2.229,11.2) (2.250,11.2) (2.271,11.4) (2.292,11.2) (2.312,11.2) (2.333,11.3) (2.354,11.5) (2.375,11.9) (2.396,11.5) (2.417,11.2) (2.438,11.6) (2.458,11.7) (2.479,12.0) (2.500,12.0) (2.521,11.7) (2.542,11.7) (2.562,11.9) (2.583,12.3) (2.604,12.6) (2.625,12.5) (2.646,12.7) (2.667,12.8) (2.688,13.0) (2.708,12.8) (2.729,12.8) (2.750,13.6) (2.771,13.5) (2.792,13.2) (2.812,13.3) (2.833,13.1) (2.854,12.9) (2.875,13.2) (2.896,14.1) (2.917,15.3) (2.938,15.3) (2.958,14.8) (2.979,14.7) (3.000,14.9) (3.021,14.2) (3.042,14.3) (3.062,15.9) (3.083,16.1) (3.104,16.4) (3.125,16.2) (3.146,16.1) (3.167,16.3) (3.188,16.0) (3.208,15.9) (3.229,15.8) (3.250,16.0) (3.271,15.9) (3.292,15.9) (3.312,15.9) (3.333,15.9) (3.354,17.2) (3.375,17.1) (3.396,17.6) (3.417,17.7) (3.438,17.3) (3.458,18.3) (3.479,19.6) (3.500,20.1) (3.521,20.0) (3.542,19.5) (3.562,19.4) (3.583,19.8) (3.604,20.1) (3.625,20.2) (3.646,20.2) (3.667,20.1) (3.688,20.4) (3.708,19.1) (3.729,20.9) (3.750,21.8) (3.771,26.2) (3.792,38.6) (3.812,52.9) (3.833,70.7) (3.854,88.8) (3.875,129.9) (3.896,164.0) (3.917,169.9) (3.938,234.6) (3.958,307.6) (3.979,326.8) (4.000,357.8) (4.021,411.0) (4.042,398.4) (4.062,364.8) (4.083,376.5) (4.104,356.2) (4.125,389.0) (4.146,403.2) (4.167,429.0) (4.188,430.4) (4.208,414.6) (4.229,443.8) (4.250,444.0) (4.271,442.0) (4.292,454.4) (4.312,443.2) (4.333,472.0) (4.354,461.9) (4.375,435.5) (4.396,467.3) (4.417,481.1) (4.438,507.0) (4.458,496.3) (4.479,529.0) (4.500,530.3)};
+\addplot[eventaware,thick] coordinates {(0.000,0.0) (0.021,0.0) (0.042,0.0) (0.062,0.0) (0.083,-0.6) (0.104,-2.2) (0.125,-2.2) (0.146,-2.2) (0.167,-2.2) (0.188,-2.2) (0.208,-2.2) (0.229,-2.2) (0.250,-2.2) (0.271,-2.2) (0.292,-2.2) (0.312,-17.3) (0.333,-19.2) (0.354,-16.8) (0.375,-17.1) (0.396,-18.0) (0.417,-19.3) (0.438,-19.3) (0.458,-19.1) (0.479,-19.1) (0.500,-19.2) (0.521,-19.2) (0.542,-19.2) (0.562,-19.2) (0.583,-19.2) (0.604,-19.0) (0.625,-19.0) (0.646,-18.8) (0.667,-18.7) (0.688,-18.9) (0.708,-18.8) (0.729,-18.8) (0.750,-18.8) (0.771,-14.4) (0.792,-9.5) (0.812,-8.8) (0.833,-7.1) (0.854,-7.0) (0.875,-7.6) (0.896,-8.0) (0.917,-7.1) (0.938,-6.1) (0.958,-5.9) (0.979,-5.5) (1.000,-5.5) (1.021,-5.6) (1.042,-5.6) (1.062,-5.6) (1.083,-5.5) (1.104,-5.5) (1.125,-5.5) (1.146,-5.5) (1.167,-5.5) (1.188,-5.5) (1.208,-5.5) (1.229,-5.5) (1.250,-5.5) (1.271,-5.5) (1.292,-5.6) (1.312,-5.9) (1.333,-5.9) (1.354,-5.2) (1.375,-4.9) (1.396,-2.4) (1.417,-2.6) (1.438,-2.5) (1.458,-3.0) (1.479,-2.7) (1.500,-2.6) (1.521,-2.5) (1.542,-2.3) (1.562,-2.3) (1.583,-2.5) (1.604,-2.8) (1.625,-2.7) (1.646,-2.6) (1.667,-2.6) (1.688,-2.4) (1.708,-2.2) (1.729,-2.0) (1.750,-1.6) (1.771,-1.9) (1.792,-1.8) (1.812,-2.1) (1.833,-1.9) (1.854,-2.2) (1.875,-2.2) (1.896,-2.5) (1.917,-1.6) (1.938,-1.8) (1.958,-1.6) (1.979,-1.6) (2.000,-1.7) (2.021,-1.7) (2.042,-1.7) (2.062,-1.8) (2.083,-1.8) (2.104,-1.0) (2.125,-0.8) (2.146,-0.7) (2.167,-0.7) (2.188,-0.8) (2.208,-0.9) (2.229,-0.7) (2.250,-0.7) (2.271,-0.4) (2.292,-0.6) (2.312,-0.4) (2.333,-0.2) (2.354,-0.0) (2.375,0.4) (2.396,-0.1) (2.417,0.3) (2.438,0.7) (2.458,0.5) (2.479,1.0) (2.500,1.1) (2.521,0.9) (2.542,0.8) (2.562,1.2) (2.583,1.2) (2.604,3.3) (2.625,1.4) (2.646,2.1) (2.667,1.6) (2.688,2.3) (2.708,2.3) (2.729,2.5) (2.750,4.0) (2.771,3.8) (2.792,3.2) (2.812,3.5) (2.833,3.5) (2.854,3.3) (2.875,3.7) (2.896,5.0) (2.917,5.9) (2.938,5.8) (2.958,5.6) (2.979,5.8) (3.000,5.9) (3.021,4.8) (3.042,4.9) (3.062,6.6) (3.083,7.0) (3.104,7.2) (3.125,7.0) (3.146,6.9) (3.167,7.3) (3.188,7.0) (3.208,6.9) (3.229,6.8) (3.250,7.1) (3.271,6.7) (3.292,7.0) (3.312,7.2) (3.333,7.3) (3.354,8.3) (3.375,8.1) (3.396,8.5) (3.417,8.5) (3.438,8.2) (3.458,9.4) (3.479,10.4) (3.500,10.8) (3.521,10.7) (3.542,10.3) (3.562,9.8) (3.583,9.8) (3.604,10.3) (3.625,10.7) (3.646,10.9) (3.667,11.1) (3.688,11.6) (3.708,10.5) (3.729,12.7) (3.750,14.7) (3.771,22.3) (3.792,33.4) (3.812,48.1) (3.833,65.8) (3.854,90.8) (3.875,142.6) (3.896,185.3) (3.917,226.3) (3.938,299.8) (3.958,343.6) (3.979,388.7) (4.000,459.8) (4.021,500.2) (4.042,501.6) (4.062,488.7) (4.083,477.4) (4.104,474.3) (4.125,514.0) (4.146,535.5) (4.167,553.5) (4.188,561.1) (4.208,540.3) (4.229,589.5) (4.250,573.4) (4.271,575.0) (4.292,578.6) (4.312,545.2) (4.333,590.9) (4.354,573.1) (4.375,552.3) (4.396,579.9) (4.417,604.6) (4.438,628.4) (4.458,612.6) (4.479,639.7) (4.500,643.4)};
+\nextgroupplot[title={B: Persistence by jump size, election night},xlabel={Jump size},ylabel={$\hat\varphi$},
+ymin=0,ymax=1.1,ybar,bar width=10pt,xtick={0,...,5},xticklabels={2-3c,3-5c,5-8c,8-12c,12-20c,20-35c},
+x tick label style={font=\tiny},xmin=-0.6,xmax=5.6]
+\addplot[fill=eventaware,draw=none] coordinates {(0,0.611) (1,0.605) (2,0.945) (3,0.851) (4,0.497) (5,0.745)};
+\draw[benchmark,dashed] (axis cs:-0.6,0.571) -- (axis cs:5.6,0.571);
+\end{groupplot}\end{tikzpicture}
+\caption{Panel A: P\&L marked to the mid every 30 minutes; shaded, 7 p.m.\ to 1 a.m.\ ET on
+November 5. Panel B: slope of the 60-minute change on a 1-minute jump, by jump size;
+dashed, the pooled pre-election estimate used by the controller.}
+\label{fig:election}
+\end{figure}
+
+\subsection{Limitations}
+One election night, whose 40 races move with one national story, is effectively one
+observation. The shape of the poll-close bump is a choice, not an estimate. The
+replay forms quotes from 1-minute candles that exist only in active minutes, has no
+queue or depth, and feeds the controller the market price rather than a fair-value
+estimate. The two pessimistic fill assumptions bound some of this, not all of it.
+Because every input is public or precedes the election, the same controller can be
+frozen before November 3, 2026, calibrated on that cycle's pre-election weeks and
+anchored on its poll-closing times, and scored against a recorded order book.
+
 \clearpage
 \appendix
 \section{Optional partial-pickoff extension}
